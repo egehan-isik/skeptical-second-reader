@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets (API keys etc.); .env.example is the committed template
+.env
+
+# Data: IBM AML dataset is large and licensed; FATF/MASAK documents are not ours to redistribute
+data/
+
+# Trained models: large, reproducible from code
+models/
+*.joblib
+*.pkl
+
+# Experiment outputs: kept out until the results are published
+results/
+
+# Tool caches
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Private notes (design decisions etc.): local only
+notes/
