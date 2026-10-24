@@ -1,5 +1,7 @@
 # Skeptical Second Reader
 
+[![CI](https://github.com/egehan-isik/skeptical-second-reader/actions/workflows/ci.yml/badge.svg)](https://github.com/egehan-isik/skeptical-second-reader/actions/workflows/ci.yml)
+
 **LLM-Assisted Decision Support for Financial Risk Analysis**
 
 ## Overview
