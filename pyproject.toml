@@ -20,8 +20,12 @@ build-backend = "uv_build"
 # UP: pyupgrade, modern Python 3.12 syntax
 select = ["E", "F", "I", "B", "UP"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = [
     "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
     "ruff>=0.17.2",
 ]
