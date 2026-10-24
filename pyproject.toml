@@ -12,3 +12,15 @@ dependencies = []
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.ruff.lint]
+# E/F: ruff defaults (style errors, undefined names, unused imports)
+# I: import sorting (replaces isort)
+# B: bugbear, likely bugs such as mutable default arguments (B006)
+# UP: pyupgrade, modern Python 3.12 syntax
+select = ["E", "F", "I", "B", "UP"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.2",
+]
