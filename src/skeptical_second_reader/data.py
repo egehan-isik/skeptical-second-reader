@@ -8,6 +8,7 @@ from skeptical_second_reader.paths import DATA_INTERIM, DATA_RAW
 
 TRANSACTIONS_CSV = DATA_RAW / "HI-Small_Trans.csv"
 TRANSACTIONS_PARQUET = DATA_INTERIM / "HI-Small_Trans.parquet"
+PATTERNS_TXT = DATA_RAW / "HI-Small_Patterns.txt"
 
 # The raw header names both account columns "Account", so columns are renamed by
 # position instead of by name.
@@ -42,6 +43,40 @@ def account_key(bank: pd.Series, account: pd.Series) -> pd.Series:
     apart, which plain concatenation would merge into "010A".
     """
     return bank + KEY_SEPARATOR + account
+
+
+def account_labels(df: pd.DataFrame) -> pd.Series:
+    """Label every account: 1 if it sends or receives any laundering transaction.
+
+    Returns a 0/1 series indexed by account key, covering all accounts in `df`.
+    Receivers count too: collecting accounts are part of a laundering pattern.
+    """
+    senders = account_key(df["from_bank"], df["from_account"])
+    receivers = account_key(df["to_bank"], df["to_account"])
+    laundering = df["is_laundering"] == 1
+    positive = pd.concat([senders[laundering], receivers[laundering]]).unique()
+    accounts = pd.Index(pd.concat([senders, receivers]).unique(), name="account")
+    return pd.Series(accounts.isin(positive).astype(int), index=accounts, name="label")
+
+
+def read_patterns(path: Path) -> pd.DataFrame:
+    """Read the laundering-attempt file: one row per transaction, with its pattern.
+
+    Columns: attempt (running number), pattern (e.g. FAN-OUT) and the ID columns,
+    kept as strings so bank codes keep their leading zeros.
+    """
+    rows = []
+    attempt, pattern = -1, None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("BEGIN"):
+            attempt += 1
+            # "BEGIN LAUNDERING ATTEMPT - FAN-OUT:  Max 16-degree Fan-Out"
+            pattern = line.split(" - ", 1)[1].split(":", 1)[0].strip()
+        elif line and not line.startswith("END"):
+            fields = line.split(",")
+            rows.append([attempt, pattern, *fields[1:5]])
+    return pd.DataFrame(rows, columns=["attempt", "pattern", *ID_COLUMNS])
 
 
 def read_transactions_csv(path: Path) -> pd.DataFrame:

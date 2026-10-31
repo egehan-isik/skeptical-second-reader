@@ -11,6 +11,8 @@ from skeptical_second_reader.data import (
     COLUMNS,
     ID_COLUMNS,
     account_key,
+    account_labels,
+    read_patterns,
     read_transactions_csv,
 )
 
@@ -69,3 +71,35 @@ def test_account_key_separates_banks_and_ambiguous_pairs():
     # Without a separator both would read "010A".
     assert keys[2] != keys[3]
     assert keys[0] == keys[3]
+
+
+def test_account_labels_mark_both_roles_of_laundering(raw_csv):
+    labels = account_labels(read_transactions_csv(raw_csv))
+    # Row 1 is laundering: CCC000003 sends, AAA000001 receives.
+    assert labels["03208:CCC000003"] == 1
+    assert labels["010:AAA000001"] == 1
+    # BBB000002 only appears in the clean row 0.
+    assert labels["001:BBB000002"] == 0
+    assert labels.size == 3
+
+
+PATTERNS_TXT = (
+    "BEGIN LAUNDERING ATTEMPT - FAN-OUT:  Max 2-degree Fan-Out\n"
+    "2022/09/01 00:06,010,AAA000001,001,BBB000002,1.00,Euro,1.00,Euro,ACH,1\n"
+    "2022/09/01 00:07,010,AAA000001,0010,CCC000003,1.00,Euro,1.00,Euro,ACH,1\n"
+    "END LAUNDERING ATTEMPT - FAN-OUT\n"
+    "\n"
+    "BEGIN LAUNDERING ATTEMPT - CYCLE:  Max 2 hops\n"
+    "2022/09/02 00:01,020,DDD000004,020,EEE000005,1.00,Euro,1.00,Euro,ACH,1\n"
+    "END LAUNDERING ATTEMPT - CYCLE\n"
+)
+
+
+def test_read_patterns_keeps_attempts_types_and_leading_zeros(tmp_path):
+    path = tmp_path / "patterns.txt"
+    path.write_text(PATTERNS_TXT)
+    p = read_patterns(path)
+    assert p["attempt"].tolist() == [0, 0, 1]
+    assert p["pattern"].tolist() == ["FAN-OUT", "FAN-OUT", "CYCLE"]
+    # 010 and 0010 are different banks; numeric parsing would merge them.
+    assert p["to_bank"].tolist() == ["001", "0010", "020"]
