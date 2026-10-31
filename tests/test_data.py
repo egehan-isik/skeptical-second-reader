@@ -7,7 +7,12 @@ in CI without the real dataset.
 import pandas as pd
 import pytest
 
-from skeptical_second_reader.data import COLUMNS, ID_COLUMNS, read_transactions_csv
+from skeptical_second_reader.data import (
+    COLUMNS,
+    ID_COLUMNS,
+    account_key,
+    read_transactions_csv,
+)
 
 RAW_CSV = (
     "Timestamp,From Bank,Account,To Bank,Account,Amount Received,Receiving Currency,"
@@ -45,3 +50,22 @@ def test_parquet_cache_keeps_ids_and_timestamps(raw_csv, tmp_path):
     back = pd.read_parquet(cached)
     pd.testing.assert_frame_equal(back[ID_COLUMNS], df[ID_COLUMNS])
     assert back["timestamp"].tolist() == df["timestamp"].tolist()
+
+
+def test_account_key_is_the_same_in_both_roles(raw_csv):
+    df = read_transactions_csv(raw_csv)
+    senders = account_key(df["from_bank"], df["from_account"])
+    receivers = account_key(df["to_bank"], df["to_account"])
+    # AAA000001 at bank 010 sends in row 0 and receives in row 1.
+    assert senders[0] == receivers[1] == "010:AAA000001"
+
+
+def test_account_key_separates_banks_and_ambiguous_pairs():
+    bank = pd.Series(["010", "020", "01", "010"])
+    account = pd.Series(["A", "A", "0A", "A"])
+    keys = account_key(bank, account)
+    # Same number at another bank is another account.
+    assert keys[0] != keys[1]
+    # Without a separator both would read "010A".
+    assert keys[2] != keys[3]
+    assert keys[0] == keys[3]

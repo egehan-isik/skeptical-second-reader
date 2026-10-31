@@ -30,6 +30,20 @@ COLUMNS = [
 ID_COLUMNS = ["from_bank", "from_account", "to_bank", "to_account"]
 
 
+# Separator for account keys; it must not occur in bank codes or account numbers.
+KEY_SEPARATOR = ":"
+
+
+def account_key(bank: pd.Series, account: pd.Series) -> pd.Series:
+    """Identify an account by its (bank, account number) pair.
+
+    The same account number can appear at different banks, so the number alone is
+    not an identity. The separator keeps pairs such as ("01", "0A") and ("010", "A")
+    apart, which plain concatenation would merge into "010A".
+    """
+    return bank + KEY_SEPARATOR + account
+
+
 def read_transactions_csv(path: Path) -> pd.DataFrame:
     """Read the raw transactions CSV.
 
