@@ -30,3 +30,9 @@ results/
 
 # Private notes (design decisions etc.): local only
 notes/
+
+# Report drafts and Word files: private until submission (public text would match
+# the report in the Turnitin similarity check)
+notes/report/
+report/
+~$*.docx
