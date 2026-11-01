@@ -9,6 +9,9 @@ from skeptical_second_reader.paths import DATA_INTERIM, DATA_RAW
 TRANSACTIONS_CSV = DATA_RAW / "HI-Small_Trans.csv"
 TRANSACTIONS_PARQUET = DATA_INTERIM / "HI-Small_Trans.parquet"
 PATTERNS_TXT = DATA_RAW / "HI-Small_Patterns.txt"
+ACCOUNTS_CSV = DATA_RAW / "HI-Small_accounts.csv"
+
+ACCOUNT_COLUMNS = ["bank_name", "bank", "account", "entity_id", "entity_name"]
 
 # The raw header names both account columns "Account", so columns are renamed by
 # position instead of by name.
@@ -77,6 +80,36 @@ def read_patterns(path: Path) -> pd.DataFrame:
             fields = line.split(",")
             rows.append([attempt, pattern, *fields[1:5]])
     return pd.DataFrame(rows, columns=["attempt", "pattern", *ID_COLUMNS])
+
+
+def read_accounts(path: Path) -> pd.DataFrame:
+    """Read the accounts file: one row per account, with the entity that owns it."""
+    df = pd.read_csv(path, engine="c", dtype=str)
+    df.columns = ACCOUNT_COLUMNS
+    return df
+
+
+def account_entities(keys: pd.Index, accounts: pd.DataFrame) -> pd.Series:
+    """Map transaction account keys to the entity that owns each account.
+
+    The accounts file writes bank codes without leading zeros ("10"), while the
+    transactions keep them ("010", "0010"), so the join uses the unpadded code.
+    Raises ValueError if dropping the zeros would merge two accounts, or if an
+    account has no entity.
+    """
+    parts = keys.to_series().str.split(KEY_SEPARATOR, n=1, expand=True)
+    unpadded_bank = parts[0].str.lstrip("0").replace("", "0")
+    join_key = account_key(unpadded_bank, parts[1])
+    if not join_key.is_unique:
+        raise ValueError("accounts merge when bank codes lose their leading zeros")
+    file_key = account_key(accounts["bank"], accounts["account"])
+    if not file_key.is_unique:
+        raise ValueError("duplicate accounts in the accounts file")
+    owner = pd.Series(accounts["entity_id"].to_numpy(), index=file_key)
+    entities = pd.Series(join_key.map(owner).to_numpy(), index=keys, name="entity_id")
+    if entities.isna().any():
+        raise ValueError(f"{entities.isna().sum()} accounts have no entity")
+    return entities
 
 
 def read_transactions_csv(path: Path) -> pd.DataFrame:

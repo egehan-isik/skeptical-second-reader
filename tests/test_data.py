@@ -10,8 +10,10 @@ import pytest
 from skeptical_second_reader.data import (
     COLUMNS,
     ID_COLUMNS,
+    account_entities,
     account_key,
     account_labels,
+    read_accounts,
     read_patterns,
     read_transactions_csv,
 )
@@ -103,3 +105,40 @@ def test_read_patterns_keeps_attempts_types_and_leading_zeros(tmp_path):
     assert p["pattern"].tolist() == ["FAN-OUT", "FAN-OUT", "CYCLE"]
     # 010 and 0010 are different banks; numeric parsing would merge them.
     assert p["to_bank"].tolist() == ["001", "0010", "020"]
+
+
+ACCOUNTS_CSV = (
+    "Bank Name,Bank ID,Account Number,Entity ID,Entity Name\n"
+    "Bank #1,10,AAA000001,E1,Corporation #1\n"
+    "Bank #2,10,BBB000002,E1,Corporation #1\n"
+    "Bank #3,3208,CCC000003,E2,Partnership #2\n"
+)
+
+
+def test_account_entities_join_on_bank_codes_without_leading_zeros(tmp_path):
+    path = tmp_path / "accounts.csv"
+    path.write_text(ACCOUNTS_CSV)
+    accounts = read_accounts(path)
+    # 010 and 0010 are different banks, but the file writes both as "10".
+    keys = pd.Index(["010:AAA000001", "0010:BBB000002", "03208:CCC000003"])
+    entities = account_entities(keys, accounts)
+    assert entities.tolist() == ["E1", "E1", "E2"]
+    assert entities.index.equals(keys)
+
+
+def test_account_entities_refuse_to_merge_accounts():
+    accounts = pd.DataFrame(
+        {"bank": ["10"], "account": ["AAA000001"], "entity_id": ["E1"]}
+    )
+    # Same number at banks 010 and 0010: without zeros both become "10:AAA000001".
+    keys = pd.Index(["010:AAA000001", "0010:AAA000001"])
+    with pytest.raises(ValueError, match="merge"):
+        account_entities(keys, accounts)
+
+
+def test_account_entities_refuse_accounts_without_entity():
+    accounts = pd.DataFrame(
+        {"bank": ["10"], "account": ["AAA000001"], "entity_id": ["E1"]}
+    )
+    with pytest.raises(ValueError, match="no entity"):
+        account_entities(pd.Index(["020:ZZZ000009"]), accounts)
