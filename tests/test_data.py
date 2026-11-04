@@ -13,6 +13,7 @@ from skeptical_second_reader.data import (
     account_entities,
     account_key,
     account_labels,
+    pattern_members,
     read_accounts,
     read_patterns,
     read_transactions_csv,
@@ -103,6 +104,7 @@ def test_read_patterns_keeps_attempts_types_and_leading_zeros(tmp_path):
     p = read_patterns(path)
     assert p["attempt"].tolist() == [0, 0, 1]
     assert p["pattern"].tolist() == ["FAN-OUT", "FAN-OUT", "CYCLE"]
+    assert p["timestamp"].iloc[1] == pd.Timestamp("2022-09-01 00:07")
     # 010 and 0010 are different banks; numeric parsing would merge them.
     assert p["to_bank"].tolist() == ["001", "0010", "020"]
 
@@ -142,3 +144,13 @@ def test_account_entities_refuse_accounts_without_entity():
     )
     with pytest.raises(ValueError, match="no entity"):
         account_entities(pd.Index(["020:ZZZ000009"]), accounts)
+
+
+def test_pattern_members_list_both_sides_once(tmp_path):
+    path = tmp_path / "patterns.txt"
+    path.write_text(PATTERNS_TXT)
+    members = pattern_members(read_patterns(path))
+    attempt0 = set(members.loc[members["attempt"] == 0, "account"])
+    # AAA000001 sends twice in attempt 0 but is listed once.
+    assert attempt0 == {"010:AAA000001", "001:BBB000002", "0010:CCC000003"}
+    assert not members.duplicated().any()

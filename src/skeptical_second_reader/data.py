@@ -65,8 +65,8 @@ def account_labels(df: pd.DataFrame) -> pd.Series:
 def read_patterns(path: Path) -> pd.DataFrame:
     """Read the laundering-attempt file: one row per transaction, with its pattern.
 
-    Columns: attempt (running number), pattern (e.g. FAN-OUT) and the ID columns,
-    kept as strings so bank codes keep their leading zeros.
+    Columns: attempt (running number), pattern (e.g. FAN-OUT), timestamp and the ID
+    columns, kept as strings so bank codes keep their leading zeros.
     """
     rows = []
     attempt, pattern = -1, None
@@ -78,8 +78,31 @@ def read_patterns(path: Path) -> pd.DataFrame:
             pattern = line.split(" - ", 1)[1].split(":", 1)[0].strip()
         elif line and not line.startswith("END"):
             fields = line.split(",")
-            rows.append([attempt, pattern, *fields[1:5]])
-    return pd.DataFrame(rows, columns=["attempt", "pattern", *ID_COLUMNS])
+            rows.append([attempt, pattern, fields[0], *fields[1:5]])
+    patterns = pd.DataFrame(
+        rows, columns=["attempt", "pattern", "timestamp", *ID_COLUMNS]
+    )
+    patterns["timestamp"] = pd.to_datetime(
+        patterns["timestamp"], format="%Y/%m/%d %H:%M"
+    )
+    return patterns
+
+
+def pattern_members(patterns: pd.DataFrame) -> pd.DataFrame:
+    """One row per (attempt, account): every account that sends or receives in a
+    laundering attempt of the pattern file."""
+    sides = [
+        pd.DataFrame(
+            {
+                "attempt": patterns["attempt"],
+                "account": account_key(
+                    patterns[f"{side}_bank"], patterns[f"{side}_account"]
+                ),
+            }
+        )
+        for side in ("from", "to")
+    ]
+    return pd.concat(sides).drop_duplicates().reset_index(drop=True)
 
 
 def read_accounts(path: Path) -> pd.DataFrame:
