@@ -20,6 +20,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SPLIT = ROOT / "src" / "skeptical_second_reader" / "split.py"
+FEATURES = ROOT / "src" / "skeptical_second_reader" / "features.py"
+WINDOW = 'window = transactions[transactions["timestamp"] < WINDOW_END]'
 
 
 @dataclass
@@ -105,6 +107,33 @@ MUTATIONS = [
         SPLIT,
         'cols = n_acc + attempts.get_indexer(members["attempt"])',
         "cols = rows",
+    ),
+    Mutation(
+        "features use the tail after the window",
+        FEATURES,
+        WINDOW,
+        'window = transactions[transactions["timestamp"].notna()]',
+    ),
+    Mutation(
+        "features include the first moment after the window",
+        FEATURES,
+        WINDOW,
+        'window = transactions[transactions["timestamp"] <= WINDOW_END]',
+    ),
+    Mutation(
+        "features depend on the label",
+        FEATURES,
+        WINDOW,
+        WINDOW + '\n    window = window[window["is_laundering"] == 0]',
+    ),
+    Mutation(
+        "accounts only active in the tail get an all-zero row",
+        FEATURES,
+        'index = pd.Index(sorted(touches["account"].unique()), name="account")',
+        'index = pd.Index(sorted(set(touches["account"]) | set('
+        'account_key(transactions["from_bank"], transactions["from_account"])) | set('
+        'account_key(transactions["to_bank"], transactions["to_account"]))), '
+        'name="account")',
     ),
 ]
 

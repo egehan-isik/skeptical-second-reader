@@ -12,6 +12,7 @@ dependencies = [
     "pyarrow>=26.0.0",
     "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
+    "xgboost>=3.4.1",
 ]
 
 [build-system]
