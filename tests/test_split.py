@@ -15,6 +15,7 @@ from skeptical_second_reader.split import (
     TRAIN,
     VAL,
     assign_folds,
+    cached_folds,
     cv_predict,
     fold_roles,
     split_groups,
@@ -57,6 +58,42 @@ def test_same_seed_gives_same_folds_and_other_seed_differs(accounts):
     first = assign_folds(labels, groups, seed=1)
     assert first.equals(assign_folds(labels, groups, seed=1))
     assert not first.equals(assign_folds(labels, groups, seed=2))
+
+
+def test_cached_folds_equal_assign_folds_and_reuse_the_file(
+    accounts, tmp_path, monkeypatch
+):
+    labels, groups = accounts
+    first = cached_folds(labels, groups, tmp_path)
+    assert first.equals(assign_folds(labels, groups))
+
+    def fail(*args, **kwargs):
+        raise AssertionError("the cache was not used")
+
+    monkeypatch.setattr("skeptical_second_reader.split.assign_folds", fail)
+    assert cached_folds(labels, groups, tmp_path).equals(first)
+
+
+@pytest.mark.parametrize("change", ["label", "group", "account", "seed", "n_folds"])
+def test_cached_folds_never_reuse_a_file_after_inputs_change(
+    accounts, tmp_path, change
+):
+    labels, groups = accounts
+    cached_folds(labels, groups, tmp_path)
+    kwargs = {}
+    if change == "label":
+        labels = labels.copy()
+        labels.iloc[0] = 1 - labels.iloc[0]
+    elif change == "group":
+        groups = groups.replace(groups.iloc[0], "renamed")
+    elif change == "account":
+        labels, groups = labels.iloc[1:], groups.iloc[1:]
+    elif change == "seed":
+        kwargs["seed"] = 7
+    else:
+        kwargs["n_folds"] = 4
+    cached_folds(labels, groups, tmp_path, **kwargs)
+    assert len(list(tmp_path.glob("folds_*.parquet"))) == 2
 
 
 def test_mismatched_or_missing_groups_are_refused(accounts):

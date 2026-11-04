@@ -12,8 +12,10 @@ roles rotate:
 So each account is tested exactly once and used for validation exactly once.
 """
 
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -90,6 +92,30 @@ def assign_folds(
     for fold, (_, test_idx) in enumerate(split):
         folds[test_idx] = fold
     return pd.Series(folds, index=labels.index, name="fold")
+
+
+def cached_folds(
+    labels: pd.Series,
+    groups: pd.Series,
+    cache_dir: Path,
+    n_folds: int = N_FOLDS,
+    seed: int = SEED,
+) -> pd.Series:
+    """`assign_folds`, stored on disk because it takes about 30 s on the full data.
+
+    The file name is a hash of everything the result depends on (accounts, labels,
+    group names, n_folds, seed), so changed inputs never reuse an old assignment.
+    """
+    inputs = pd.DataFrame({"label": labels, "group": groups.astype(str)})
+    digest = hashlib.sha256(pd.util.hash_pandas_object(inputs).to_numpy().tobytes())
+    digest.update(f"{n_folds}:{seed}".encode())
+    path = cache_dir / f"folds_{digest.hexdigest()[:16]}.parquet"
+    if path.exists():
+        return pd.read_parquet(path)["fold"]
+    folds = assign_folds(labels, groups, n_folds, seed)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    folds.to_frame().to_parquet(path)
+    return folds
 
 
 def fold_roles(folds: pd.Series, k: int, n_folds: int = N_FOLDS) -> pd.Series:
