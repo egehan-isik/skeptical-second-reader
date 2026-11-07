@@ -5,7 +5,19 @@ import pandas as pd
 import pytest
 from sklearn.metrics import roc_auc_score
 
-from skeptical_second_reader.model import fit_xgboost
+from skeptical_second_reader.model import FINAL_PARAMS, fit_xgboost
+
+
+def test_final_parameters_are_the_chosen_ones():
+    assert FINAL_PARAMS == {
+        "n_estimators": 3000,
+        "learning_rate": 0.03,
+        "max_depth": 6,
+        "min_child_weight": 1,
+        "subsample": 0.9,
+        "colsample_bytree": 1.0,
+        "reg_lambda": 1,
+    }
 
 
 @pytest.fixture
@@ -39,3 +51,5 @@ def test_training_stops_early_on_the_validation_fold(data):
     )
     model = fit_xgboost(X_train, y_train, X_val, noise).model
     assert model.best_iteration < 200
+    # On these labels nothing scores well. On the training data it would be near 1.
+    assert model.best_score < 0.8
