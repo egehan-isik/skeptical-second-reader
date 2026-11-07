@@ -28,6 +28,19 @@ Requires [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
+## How to run
+
+The steps below need the data (see below) and, for the LLM answers, [Ollama](https://ollama.com) with the models `gemma4:latest` and `qwen3.5:9b-q4_K_M`.
+
+```bash
+uv run pytest                                  # tests, no data needed
+uv run python scripts/run_pipeline.py          # ML model, cases, prompts, LLM answers
+uv run streamlit run app/streamlit_app.py      # the demo, from the cached answers
+uv run python scripts/mutation_check.py        # shows that the tests catch planted mistakes
+```
+
+The pipeline runs only what changed and keeps every LLM answer in a cache, so a stopped run continues where it stopped. The analysis is in `notebooks/`, numbered in the order the work was done.
+
 ## Data
 
 No data is stored in this repository.
