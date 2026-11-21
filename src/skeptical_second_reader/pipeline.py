@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from skeptical_second_reader import second_reader as sr
-from skeptical_second_reader.facts import fact_lines
+from skeptical_second_reader.facts import fact_lines, percentile_lines
 from skeptical_second_reader.transactions import TX_FEATURES
 
 MANIFEST = "manifest.json"
@@ -210,6 +210,7 @@ def build_prompts(
 
 
 READ_ALONE, READ_FACTS = "K1", "K1_facts"
+READ_GUIDE, READ_SHOTS = "K1_guide", "K1_guide_shots"
 
 
 def reading_prompts(
@@ -217,21 +218,58 @@ def reading_prompts(
     pair_count: np.ndarray,
     cases: pd.Series,
     facts: pd.DataFrame,
+    guide: str | None = None,
+    shots: str | None = None,
+    percentiles: tuple[pd.DataFrame, pd.DataFrame] | None = None,
+    typical: tuple[pd.DataFrame, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """The reading test: each account alone, and alone with its facts block.
 
-    No ML output in either. `cases` holds the stratum of each account.
+    No ML output in any condition. `cases` holds the stratum of each account. With a
+    `guide` (and `percentiles`, from `facts.fact_percentiles`) only the guided
+    conditions are made: the facts beside the other accounts and the guide, and with
+    `shots` the same with solved examples; both also ask for a 0-100 score. `typical`
+    (from `facts.typical_ranges`) adds the range of clean accounts as busy as each one.
     """
+    if guide is not None and percentiles is None:
+        raise ValueError("the guided conditions need the percentiles")
     records = []
     for account, stratum in cases.items():
         rows = sr.account_rows(table, pair_count, account)
         evidence, _ = sr.account_evidence(rows, account)
-        variants = {
-            READ_ALONE: sr.build_prompt(evidence, None),
-            READ_FACTS: sr.build_prompt(
-                evidence, None, facts=fact_lines(facts.loc[account])
-            ),
-        }
+        if guide is None:
+            variants = {
+                READ_ALONE: sr.build_prompt(evidence, None),
+                READ_FACTS: sr.build_prompt(
+                    evidence, None, facts=fact_lines(facts.loc[account])
+                ),
+            }
+        else:
+            lower, same = percentiles
+            low = high = None
+            if typical is not None:
+                low, high = typical[0].loc[account], typical[1].loc[account]
+            block = "\n\n".join(
+                [
+                    fact_lines(facts.loc[account]),
+                    percentile_lines(
+                        facts.loc[account],
+                        lower.loc[account],
+                        same.loc[account],
+                        low,
+                        high,
+                    ),
+                ]
+            )
+            variants = {
+                READ_GUIDE: sr.build_prompt(
+                    evidence, None, facts=block, guide=guide, score=True
+                )
+            }
+            if shots is not None:
+                variants[READ_SHOTS] = sr.build_prompt(
+                    evidence, None, facts=block, guide=guide, shots=shots, score=True
+                )
         for condition, prompt in variants.items():
             records.append(
                 {
@@ -284,6 +322,7 @@ def answer_prompts(
                 "flipped": row.flipped,
                 "decision": answer["decision"],
                 "confidence": answer["confidence"],
+                "score": answer["score"],
                 "evidence": json.dumps(answer["evidence"]),
                 "reason": answer["reason"],
                 "follows_model": sr.follows_model(answer["decision"], shown),

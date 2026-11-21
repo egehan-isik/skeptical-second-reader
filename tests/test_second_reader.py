@@ -380,3 +380,42 @@ def test_a_certain_rate_is_not_shown_as_certainty():
 def test_a_conversion_is_described_as_the_senders():
     assert "the sender converted" in sr._describe("after_conversion", 1.0, "ACH", "E")
     assert "the sender did not" in sr._describe("after_conversion", 0.0, "ACH", "E")
+
+
+def test_guide_and_examples_come_before_the_account_and_score_is_optional():
+    plain = sr.build_prompt("EVIDENCE", None, facts="FACTS")
+    assert '"score"' not in plain
+    full = sr.build_prompt(
+        "EVIDENCE", None, facts="FACTS", guide="GUIDE", shots="SHOTS", score=True
+    )
+    order = [full.index(s) for s in ["GUIDE", "SHOTS", "EVIDENCE", "FACTS", "Answer"]]
+    assert order == sorted(order)
+    assert full.index('"confidence"') < full.index('"score"') < full.index('"evidence"')
+    stripped = full.replace("GUIDE\n\n", "").replace("SHOTS\n\n", "")
+    assert stripped.replace(sr.SCORE_LINE, "") == plain
+
+
+@pytest.mark.parametrize(
+    ("content", "score"),
+    [
+        ('{"decision": "suspicious", "confidence": 0.8, "score": 73}', 73),
+        ('{"decision": "suspicious", "confidence": 0.8, "score": 0}', 0),
+        ('{"decision": "suspicious", "confidence": 0.8, "score": 100.0}', 100.0),
+        ('{"decision": "suspicious", "confidence": 0.8, "score": 101}', None),
+        ('{"decision": "suspicious", "confidence": 0.8, "score": -1}', None),
+        ('{"decision": "suspicious", "confidence": 0.8, "score": true}', None),
+        ('{"decision": "suspicious", "confidence": 0.8, "score": "70"}', None),
+        ('{"decision": "suspicious", "confidence": 0.8}', None),
+        ("not json", None),
+    ],
+)
+def test_parse_answer_score(content, score):
+    assert sr.parse_answer(content)["score"] == score
+
+
+def test_the_shot_block_numbers_examples_and_states_the_answer():
+    text = sr.shot_block([("F1", True, "W1"), ("F2", False, "W2")])
+    assert text.startswith("SOLVED EXAMPLES")
+    assert "Example 1: involved in money laundering\nF1\nWhy: W1" in text
+    assert "Example 2: not involved\nF2\nWhy: W2" in text
+    assert text.index("Example 1") < text.index("Example 2")

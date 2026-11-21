@@ -13,12 +13,15 @@ Run from the project root:
 Exit code 0 if every mistake is caught.
 """
 
+import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+REPORT = ROOT / "data" / "interim" / "mutation_report.json"
 SPLIT = ROOT / "src" / "skeptical_second_reader" / "split.py"
 FEATURES = ROOT / "src" / "skeptical_second_reader" / "features.py"
 MODEL = ROOT / "src" / "skeptical_second_reader" / "model.py"
@@ -29,6 +32,8 @@ PIPELINE = ROOT / "src" / "skeptical_second_reader" / "pipeline.py"
 DEMO = ROOT / "src" / "skeptical_second_reader" / "demo.py"
 FACTS = ROOT / "src" / "skeptical_second_reader" / "facts.py"
 READING_SAMPLE = ROOT / "src" / "skeptical_second_reader" / "reading_sample.py"
+GUIDE = ROOT / "src" / "skeptical_second_reader" / "guide.py"
+FRESH = ROOT / "src" / "skeptical_second_reader" / "fresh.py"
 WINDOW = 'window = transactions[transactions["timestamp"] < WINDOW_END]'
 EARLY = 'early = transactions[transactions["timestamp"] < WINDOW_END]'
 ALL_ROWS = 'early = transactions[transactions["timestamp"].notna()]'
@@ -823,6 +828,180 @@ MUTATIONS = [
         "    if facts is not None:\n        parts.append(facts)",
         "    if facts is not None:\n        parts.insert(0, facts)",
     ),
+    Mutation(
+        "a percentile counts equal values as lower",
+        FACTS,
+        "lower.loc[known, name] = left / len(ref)",
+        "lower.loc[known, name] = right / len(ref)",
+    ),
+    Mutation(
+        "percentiles count reference accounts without the fact",
+        FACTS,
+        "ref = np.sort(reference[name].dropna().to_numpy())",
+        "ref = np.sort(reference[name].fillna(0).to_numpy())",
+    ),
+    Mutation(
+        "a tiny share is written as 0%",
+        FACTS,
+        "if 0 < percent < 1:",
+        "if 0 < percent < 0:",
+    ),
+    Mutation(
+        "the comparison shows facts that do not apply",
+        FACTS,
+        "        if np.isnan(facts[name]):\n            continue",
+        "        if np.isnan(facts[name]):\n            pass",
+    ),
+    Mutation(
+        "every prompt asks for a score",
+        READER,
+        '+ (SCORE_LINE if score else "")',
+        "+ SCORE_LINE",
+    ),
+    Mutation(
+        "the account comes before the guide",
+        READER,
+        "    parts.append(evidence)\n",
+        "    parts.insert(1, evidence)\n",
+    ),
+    Mutation(
+        "a score above 100 is accepted",
+        READER,
+        "0 <= score <= 100",
+        "0 <= score <= 1000",
+    ),
+    Mutation(
+        "solved examples state the wrong answer",
+        READER,
+        '"involved in money laundering" if involved else "not involved"',
+        '"not involved" if involved else "involved in money laundering"',
+    ),
+    Mutation(
+        "the guided prompt does not ask for a score",
+        PIPELINE,
+        "evidence, None, facts=block, guide=guide, score=True\n",
+        "evidence, None, facts=block, guide=guide, score=False\n",
+    ),
+    Mutation(
+        "the examples prompt has no examples",
+        PIPELINE,
+        "shots=shots, score=True",
+        "shots=None, score=True",
+    ),
+    Mutation(
+        "the guided prompt has no comparison with other accounts",
+        PIPELINE,
+        "                    percentile_lines(\n",
+        "                    (lambda *a: '') (\n",
+    ),
+    Mutation(
+        "an example may be an account the reader is asked about",
+        READING_SAMPLE,
+        "pool = labels.index.difference(exclude)",
+        "pool = labels.index",
+    ),
+    Mutation(
+        "an example of a type may be any account",
+        READING_SAMPLE,
+        "index=_take(candidates, 1, seed)",
+        "index=_take(pool, 1, seed)",
+    ),
+    Mutation(
+        "a clean example may come from the pattern file",
+        READING_SAMPLE,
+        "clean_pool = pool[~positive & ~in_file[pool].to_numpy()]",
+        "clean_pool = pool[~positive]",
+    ),
+    Mutation(
+        "a guide example may be an account the reader is asked about",
+        GUIDE,
+        "pool = facts.index.difference(exclude)",
+        "pool = facts.index",
+    ),
+    Mutation(
+        "the strong-sign example ignores the number of payees",
+        GUIDE,
+        '& (conv == 1) & (f["payees"] <= 1)',
+        "& (conv == 1)",
+    ),
+    Mutation(
+        "the busy clean example need not be busy",
+        GUIDE,
+        "& (activity >= 10)",
+        "& (activity >= 0)",
+    ),
+    Mutation(
+        "the typical range uses positive accounts too",
+        GUIDE,
+        "clean = reference[labels.loc[reference].to_numpy() == 0]",
+        "clean = reference",
+    ),
+    Mutation(
+        "the percentiles include the reading samples",
+        GUIDE,
+        '"percentiles": fact_percentiles(facts, facts.loc[reference]),',
+        '"percentiles": fact_percentiles(facts, facts),',
+    ),
+    Mutation(
+        "the examples may come from the earlier experiments",
+        GUIDE,
+        "shots = choose_shots(facts, labels, activity, samples.union(used), seed=seed)",
+        "shots = choose_shots(facts, labels, activity, samples, seed=seed)",
+    ),
+    Mutation(
+        "the typical range ignores activity",
+        FACTS,
+        "low = reference_facts.groupby(reference_bins).quantile(TYPICAL_LOW)",
+        "low = reference_facts.groupby(reference_bins * 0).quantile(TYPICAL_LOW)",
+    ),
+    Mutation(
+        "the typical range is the full range, not 10th to 90th",
+        FACTS,
+        "TYPICAL_LOW, TYPICAL_HIGH = 0.1, 0.9",
+        "TYPICAL_LOW, TYPICAL_HIGH = 0.0, 1.0",
+    ),
+    Mutation(
+        "activity bins are off by one",
+        FACTS,
+        "bins = pd.cut(activity, ACTIVITY_EDGES, right=True, labels=False)",
+        "bins = pd.cut(activity, ACTIVITY_EDGES, right=False, labels=False)",
+    ),
+    Mutation(
+        "the guided prompt drops the typical range",
+        PIPELINE,
+        "low, high = typical[0].loc[account], typical[1].loc[account]",
+        "low, high = None, None",
+    ),
+    Mutation(
+        "the demo's XGBoost view reads the label too",
+        DEMO,
+        'directory / "transaction_reading.parquet", columns=["score", "flag"]',
+        'directory / "transaction_reading.parquet", columns=["score", "flag", "label"]',
+    ),
+    Mutation(
+        "a live demo answer is written into the experiment's cache",
+        DEMO,
+        "live = pl.AnswerCache(directory / LIVE_ANSWERS)",
+        "live = pl.AnswerCache(directory / ANSWERS)",
+    ),
+    Mutation(
+        "a demo case counts when only one model fits its rule",
+        DEMO,
+        'index="account", columns="condition", values="says", aggfunc="min"',
+        'index="account", columns="condition", values="says", aggfunc="max"',
+    ),
+    Mutation(
+        "the fresh check scores the confidence whatever the decision",
+        FRESH,
+        'score = np.where(says, rows["confidence"], 1 - rows["confidence"])',
+        'score = rows["confidence"].to_numpy()',
+    ),
+    Mutation(
+        "the fresh check counts a clean stratum as involved",
+        FRESH,
+        "return (~strata.isin([MATCHED_NAME, RANDOM_NAME])).astype(int)",
+        "return (~strata.isin([MATCHED_NAME])).astype(int)",
+    ),
 ]
 
 
@@ -855,13 +1034,24 @@ def main() -> int:
         print("The unmodified code fails its tests; fix that first.")
         return 1
     print(f"{'result':<8} mutation")
-    n_caught = 0
+    missed = []
     for mutation in MUTATIONS:
         caught = run(mutation)
-        n_caught += caught
+        if not caught:
+            missed.append(mutation.name)
         print(f"{'caught' if caught else 'MISSED':<8} {mutation.name}")
+    n_caught = len(MUTATIONS) - len(missed)
     print(f"\n{n_caught} of {len(MUTATIONS)} deliberate mistakes caught")
-    return 0 if n_caught == len(MUTATIONS) else 1
+    # The demo's "How it is checked" page shows the last full run.
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "date": time.strftime("%Y-%m-%d %H:%M"),
+        "total": len(MUTATIONS),
+        "caught": n_caught,
+        "missed": missed,
+    }
+    REPORT.write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    return 0 if not missed else 1
 
 
 if __name__ == "__main__":

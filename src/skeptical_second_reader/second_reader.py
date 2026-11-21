@@ -303,18 +303,36 @@ def ml_block(
     return "\n".join(parts)
 
 
-def build_prompt(evidence: str, ml_text: str | None, facts: str | None = None) -> str:
+SCORE_LINE = (
+    ' "score": a whole number from 0 to 100, how likely it is that the account is '
+    "involved in money laundering,\n"
+)
+
+
+def build_prompt(
+    evidence: str,
+    ml_text: str | None,
+    facts: str | None = None,
+    guide: str | None = None,
+    shots: str | None = None,
+    score: bool = False,
+) -> str:
     """The whole prompt. The instruction is the same in every condition.
 
-    Without `facts` the prompt is exactly that of the first experiment, so its
-    cached answers stay valid.
+    Without `facts`, `guide`, `shots` and `score` the prompt is exactly that of the
+    first experiment, so its cached answers stay valid. The guide and the solved
+    examples come before the account; `score` asks for a 0-100 score as well.
     """
     parts = [
         "You are assisting an anti-money-laundering analyst. Review one bank account "
         "and give your own assessment of whether it is involved in money laundering. "
         "Account names are masked.",
-        evidence,
     ]
+    if guide is not None:
+        parts.append(guide)
+    if shots is not None:
+        parts.append(shots)
+    parts.append(evidence)
     if facts is not None:
         parts.append(facts)
     if ml_text is not None:
@@ -323,9 +341,25 @@ def build_prompt(evidence: str, ml_text: str | None, facts: str | None = None) -
         "Answer ONLY with JSON:\n"
         '{"decision": "suspicious" or "not_suspicious",\n'
         ' "confidence": a number from 0 to 1, how sure you are of your decision,\n'
-        ' "evidence": a list of the transaction numbers you relied on,\n'
+        + (SCORE_LINE if score else "")
+        + ' "evidence": a list of the transaction numbers you relied on,\n'
         ' "reason": "2 to 4 sentences for the analyst"}'
     )
+    return "\n\n".join(parts)
+
+
+def shot_block(examples: list[tuple[str, bool, str]]) -> str:
+    """Solved examples: a summary of other accounts' facts, the answer and why.
+
+    Each example is (facts text, involved in laundering, one line on why).
+    """
+    parts = [
+        "SOLVED EXAMPLES FROM OTHER ACCOUNTS OF THE SAME BANK (a summary of their "
+        "facts)"
+    ]
+    for number, (text, involved, why) in enumerate(examples, start=1):
+        answer = "involved in money laundering" if involved else "not involved"
+        parts.append(f"Example {number}: {answer}\n{text}\nWhy: {why}")
     return "\n\n".join(parts)
 
 
@@ -371,14 +405,26 @@ def case_prompt(
     return build_prompt(evidence, ml_block(shown, number, text, reasons)), shown
 
 
+EMPTY_ANSWER = {
+    "decision": None,
+    "confidence": None,
+    "score": None,
+    "evidence": [],
+    "reason": None,
+}
+
+
 def parse_answer(content: str) -> dict:
-    """The fields of an answer; `decision` is None if it is not usable."""
+    """The fields of an answer; `decision` is None if it is not usable.
+
+    `score` (0-100) is None when the prompt did not ask for it or it is not usable.
+    """
     try:
         answer = json.loads(content)
     except json.JSONDecodeError:
-        return {"decision": None, "confidence": None, "evidence": [], "reason": None}
+        return dict(EMPTY_ANSWER)
     if not isinstance(answer, dict):
-        return {"decision": None, "confidence": None, "evidence": [], "reason": None}
+        return dict(EMPTY_ANSWER)
     decision = answer.get("decision")
     if decision not in (SUSPICIOUS, NOT_SUSPICIOUS):
         decision = None
@@ -389,10 +435,18 @@ def parse_answer(content: str) -> dict:
         or not 0 <= confidence <= 1
     ):
         confidence = None
+    score = answer.get("score")
+    if (
+        isinstance(score, bool)
+        or not isinstance(score, int | float)
+        or not (0 <= score <= 100)
+    ):
+        score = None
     evidence = answer.get("evidence")
     return {
         "decision": decision,
         "confidence": confidence,
+        "score": score,
         "evidence": evidence if isinstance(evidence, list) else [],
         "reason": answer.get("reason"),
     }

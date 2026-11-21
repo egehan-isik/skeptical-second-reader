@@ -166,3 +166,125 @@ def fact_lines(facts: pd.Series) -> str:
         f"most {facts['busiest_day']:.0f} transactions in one day."
     )
     return "\n".join(lines)
+
+
+# How each fact is named when it is compared with other accounts.
+FACT_NAMES = {
+    "payers": "different accounts that pay A",
+    "payees": "different accounts A pays",
+    "both_ways": "counterparties that both pay A and are paid by A",
+    "share_sent_on_within_day": "share of received payments followed by a send "
+    "within 24 hours",
+    "median_hours_to_send_on": "median hours from a received payment to the next send",
+    "sends_with_conversion": "payments sent in the same minute as a conversion",
+    "most_sends_same_amount": "most payments sent with exactly the same amount",
+    "payers_median_payees": "median number of accounts paid by each payer of A",
+    "payees_median_payers": "median number of payers of each account A pays",
+    "active_days": "active days",
+    "busiest_day": "most transactions in one day",
+}
+
+
+def fact_percentiles(
+    facts: pd.DataFrame, reference: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Where each fact of each account stands among the reference accounts.
+
+    Two tables with the index and columns of `facts`: the share of reference accounts
+    with a lower value, and the share with the same value. A reference account for
+    which a fact does not apply (NaN) is left out of that fact; a NaN fact stays NaN.
+    No label is used.
+    """
+    lower = pd.DataFrame(np.nan, index=facts.index, columns=facts.columns)
+    same = lower.copy()
+    for name in facts.columns:
+        ref = np.sort(reference[name].dropna().to_numpy())
+        values = facts[name].to_numpy()
+        known = ~np.isnan(values)
+        left = np.searchsorted(ref, values[known], side="left")
+        right = np.searchsorted(ref, values[known], side="right")
+        lower.loc[known, name] = left / len(ref)
+        same.loc[known, name] = (right - left) / len(ref)
+    return lower, same
+
+
+def _share(value: float) -> str:
+    percent = value * 100
+    if 0 < percent < 1:
+        return "less than 1%"
+    if 99 < percent < 100:
+        return f"{percent:.1f}%"
+    return f"{percent:.0f}%"
+
+
+def _value(name: str, value: float) -> str:
+    if name == "share_sent_on_within_day":
+        return f"{value * 100:.0f}%"
+    if name == "median_hours_to_send_on":
+        return f"{value:.1f}"
+    return f"{value:.0f}"
+
+
+def percentile_lines(
+    facts: pd.Series,
+    lower: pd.Series,
+    same: pd.Series,
+    low: pd.Series | None = None,
+    high: pd.Series | None = None,
+) -> str:
+    """The facts of one account beside the other accounts, as the reader is shown.
+
+    With `low` and `high` (from `typical_ranges`) each line also gives the typical
+    range of clean accounts as busy as this one.
+    """
+    lines = [
+        "HOW THESE FACTS COMPARE WITH THE OTHER ACCOUNTS OF THE BANK",
+    ]
+    for name in FACTS:
+        if np.isnan(facts[name]):
+            continue
+        line = (
+            f"- {FACT_NAMES[name]}: {_value(name, facts[name])}; higher than "
+            f"{_share(lower[name])} of accounts, the same as {_share(same[name])}"
+        )
+        if low is not None and not np.isnan(low[name]):
+            line += (
+                f"; typical for clean accounts as busy as A: "
+                f"{_value(name, low[name])} to {_value(name, high[name])}"
+            )
+        lines.append(line + ".")
+    return "\n".join(lines)
+
+
+# Bins of the number of transactions in the window, for "clean accounts as busy as A".
+ACTIVITY_EDGES = [0, 1, 2, 4, 8, 16, 32, 64, np.inf]
+TYPICAL_LOW, TYPICAL_HIGH = 0.1, 0.9
+
+
+def activity_bins(activity: pd.Series) -> pd.Series:
+    """The bin of each account's number of transactions (1, 2, 3-4, 5-8, ...)."""
+    bins = pd.cut(activity, ACTIVITY_EDGES, right=True, labels=False)
+    return bins.astype(int)
+
+
+def typical_ranges(
+    facts: pd.DataFrame,
+    activity: pd.Series,
+    reference_facts: pd.DataFrame,
+    reference_activity: pd.Series,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The 10th and 90th percentile of each fact among the reference accounts of the
+    same activity bin, for every account of `facts`.
+
+    The reference must hold only clean accounts outside the samples the reader is
+    asked about: this is the one place where labels go into a prompt. A fact that does
+    not apply to a reference account is left out of its range; a bin without any
+    value gives NaN.
+    """
+    reference_bins = activity_bins(reference_activity)
+    low = reference_facts.groupby(reference_bins).quantile(TYPICAL_LOW)
+    high = reference_facts.groupby(reference_bins).quantile(TYPICAL_HIGH)
+    bins = activity_bins(activity)
+    low = low.reindex(bins.to_numpy()).set_axis(facts.index)[facts.columns]
+    high = high.reindex(bins.to_numpy()).set_axis(facts.index)[facts.columns]
+    return low, high

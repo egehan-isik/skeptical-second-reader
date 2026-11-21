@@ -280,8 +280,10 @@ def test_models_are_counted_apart():
     assert k2.loc["n", "accounts"] == 0
 
 
-def run_app():
-    return AppTest.from_file(APP, default_timeout=30).run()
+def run_app(page="Case review"):
+    app = AppTest.from_file(APP, default_timeout=30)
+    app.session_state["page"] = page
+    return app.run()
 
 
 def metric_of(app, label):
@@ -374,3 +376,390 @@ def test_the_research_view_shows_every_condition_and_warns(folder):
     assert any("Hidden in this condition" in m.value for m in app.markdown)
     app.sidebar.selectbox[0].set_value("Corrupted ML output, 100%").run()
     assert any("deliberately corrupted" in w.value for w in app.warning)
+
+
+# The reading test page.
+
+FACTS_BLOCK = (
+    "FACTS COMPUTED FROM ALL TRANSACTIONS OF THE WINDOW, INCLUDING THOSE OF THE "
+    "COUNTERPARTIES\n- A is paid by 1 account and pays 1 account.\n\n"
+    "HOW THESE FACTS COMPARE WITH THE OTHER ACCOUNTS OF THE BANK\n"
+    "- different accounts that pay A: 1; higher than 45% of accounts."
+)
+GUIDED_ANSWER = (
+    '{"decision": "not_suspicious", "confidence": 0.8, "score": 20, '
+    '"evidence": [], "reason": "no sign"}'
+)
+MODEL_NAMES = ["gemma4:latest", "qwen3.5:9b-q4_K_M"]
+READING_GROUPS = {
+    "p:1": "pattern CYCLE",
+    "p:2": "positive, outside the file",
+    "c:1": "clean, matched activity",
+    "c:2": "clean, random",
+}
+
+
+def evidence_of():
+    return prompt_of(sr.K1).split("\n\n")[1]
+
+
+def guided_prompt():
+    shots = sr.shot_block([("4 transactions; paid by 1 accounts.", True, "one sign")])
+    return sr.build_prompt(
+        evidence_of(),
+        None,
+        facts=FACTS_BLOCK,
+        guide="GUIDE: WHAT SEPARATES LAUNDERING ACCOUNTS IN THIS BANK\n- a sign",
+        shots=shots,
+        score=True,
+    )
+
+
+def reading_rows(condition):
+    rows = []
+    for account, group in READING_GROUPS.items():
+        base = (
+            sr.build_prompt(evidence_of(), None)
+            if condition == pl.READ_ALONE
+            else guided_prompt()
+        )
+        rows.append(
+            {
+                "account": account,
+                "group": group,
+                "condition": condition,
+                # A distinct prompt per account, so each has its own cached answer.
+                "prompt": base + f"\n\nCase {account}",
+                "shown_level": None,
+                "shown_rate": np.nan,
+                "flipped": None,
+            }
+        )
+    return rows
+
+
+def reading_results(decisions):
+    """decisions: {(account, condition): decision}, the same for both models."""
+    rows = []
+    for model in MODEL_NAMES:
+        for (account, condition), decision in decisions.items():
+            rows.append(
+                {
+                    "model": model,
+                    "account": account,
+                    "group": READING_GROUPS[account],
+                    "condition": condition,
+                    "decision": decision,
+                    "confidence": 0.8,
+                    "score": 20.0 if condition == pl.READ_SHOTS else np.nan,
+                    "reason": "r",
+                    "seconds": 1.0,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+S, N = sr.SUSPICIOUS, sr.NOT_SUSPICIOUS
+DECISIONS = {
+    ("p:1", pl.READ_ALONE): S,
+    ("p:1", pl.READ_SHOTS): S,
+    ("p:2", pl.READ_ALONE): S,
+    ("p:2", pl.READ_SHOTS): N,
+    ("c:1", pl.READ_ALONE): S,
+    ("c:1", pl.READ_SHOTS): N,
+    ("c:2", pl.READ_ALONE): N,
+    ("c:2", pl.READ_SHOTS): N,
+}
+
+
+@pytest.fixture
+def reading_folder(tmp_path, monkeypatch, folder):
+    reading = tmp_path / "reading"
+    reading.mkdir()
+    alone, guided = reading_rows(pl.READ_ALONE), reading_rows(pl.READ_SHOTS)
+    pd.DataFrame(alone).to_parquet(reading / "prompts_test.parquet")
+    pd.DataFrame(guided).to_parquet(reading / "prompts_test_guided.parquet")
+    results = reading_results(DECISIONS)
+    is_alone = results["condition"] == pl.READ_ALONE
+    results[is_alone].to_parquet(reading / "results_test.parquet")
+    results[~is_alone].to_parquet(reading / "results_test_guided.parquet")
+    cache = pl.AnswerCache(reading / demo.ANSWERS)
+    reply = {**REPLY, "content": GUIDED_ANSWER}
+    for model in MODEL_NAMES:
+        digest = f"version of {model}"
+        for row in alone + guided:
+            cache.put(pl.answer_key(row["prompt"], digest, False), model, digest, reply)
+    cache.close()
+    accounts = list(READING_GROUPS)
+    pd.DataFrame(
+        {"score": [0.9, 0.2, 0.6, 0.1], "flag": [1, 0, 1, 0], "label": [1, 1, 0, 0]},
+        index=accounts,
+    ).to_parquet(tmp_path / "transaction_reading.parquet")
+    pd.DataFrame(
+        {
+            "scores evidence and facts": [0.8, 0.3, 0.4, 0.1],
+            "flags evidence and facts": [1, 0, 0, 0],
+        },
+        index=accounts,
+    ).to_parquet(tmp_path / "ceiling_facts_scores.parquet")
+    monkeypatch.setenv(demo.READING_VARIABLE, str(reading))
+    monkeypatch.setenv(demo.SCORES_VARIABLE, str(tmp_path))
+    return reading
+
+
+def test_the_reading_sets_list_the_test_sample_and_fresh_runs(reading_folder):
+    assert demo.reading_sets(reading_folder) == {demo.TEST_SET: (None, None)}
+    run = reading_folder / "fresh_seed101_small"
+    run.mkdir()
+    pd.DataFrame(reading_rows(pl.READ_ALONE)).to_parquet(run / "prompts.parquet")
+    assert list(demo.reading_sets(reading_folder)) == [demo.TEST_SET]
+    reading_results(DECISIONS).to_parquet(run / demo.STORED_RESULTS)
+    reading_results(DECISIONS).to_parquet(run / demo.LIVE_RESULTS)
+    sets = demo.reading_sets(reading_folder)
+    assert sets["Fresh sample, seed 101 (small)"] == (run, demo.STORED_RESULTS)
+    assert sets["New accounts, seed 101 (small)"] == (run, demo.LIVE_RESULTS)
+
+
+def test_the_test_sample_joins_alone_and_guided(reading_folder):
+    prompts, results = demo.load_reading_set(reading_folder, None)
+    assert set(prompts["condition"]) == {pl.READ_ALONE, pl.READ_SHOTS}
+    assert len(prompts) == 2 * len(READING_GROUPS)
+    assert len(results) == 2 * len(DECISIONS)
+
+
+def test_reading_cases_hide_the_strata_in_a_fixed_order(reading_folder):
+    prompts, _ = demo.load_reading_set(reading_folder, None)
+    cases = demo.reading_cases(prompts)
+    assert cases["case"].tolist() == [f"Reading {i:03d}" for i in range(1, 5)]
+    assert set(cases["account"]) == set(READING_GROUPS)
+    again = demo.reading_cases(prompts)
+    assert cases.equals(again)
+
+
+def test_a_guided_prompt_splits_into_its_sections():
+    sections = demo.guided_sections(guided_prompt())
+    assert sections["guide"].startswith("GUIDE:")
+    assert len(sections["examples"]) == 1
+    assert sections["examples"][0].startswith("Example 1: involved")
+    assert sections["evidence"] == evidence_of()
+    assert sections["facts"] == ["- A is paid by 1 account and pays 1 account."]
+    assert sections["comparison"][0].startswith("- different accounts that pay A")
+
+
+def test_a_prompt_without_the_guide_is_refused():
+    with pytest.raises(ValueError):
+        demo.guided_sections(sr.build_prompt(evidence_of(), None))
+
+
+def test_demo_cases_follow_their_rules():
+    groups = pd.Series(READING_GROUPS)
+    chosen = demo.demo_cases(reading_results(DECISIONS), groups)
+    assert chosen["c:1"] == "a false alarm the guide removes"
+    assert chosen["p:1"] == "a positive caught with the guide"
+    assert chosen["p:2"] == "a positive outside the pattern file"
+    assert "c:2" not in chosen.index
+    assert demo.demo_cases(pd.DataFrame(), groups).empty
+
+
+def test_a_demo_case_needs_both_models_to_agree():
+    results = reading_results(DECISIONS)
+    gemma = (results["model"] == MODEL_NAMES[0]) & (results["account"] == "c:1")
+    results.loc[gemma & (results["condition"] == pl.READ_SHOTS), "decision"] = S
+    chosen = demo.demo_cases(results, pd.Series(READING_GROUPS))
+    assert "c:1" not in chosen.index
+
+
+def test_missing_stored_answers_are_counted(reading_folder):
+    prompts, _ = demo.load_reading_set(reading_folder, None)
+    assert demo.cache_gaps(reading_folder, prompts, READING_GROUPS, MODEL_NAMES) == 0
+    assert demo.cache_gaps(reading_folder, prompts, ["p:1"], ["other:model"]) == 2
+
+
+def test_a_live_check_asks_again_and_leaves_the_stored_answers(
+    reading_folder, monkeypatch
+):
+    model = MODEL_NAMES[0]
+    monkeypatch.setattr(demo, "installed_digest", lambda m: f"version of {m}")
+    calls = []
+
+    def ask(text, name, think):
+        calls.append((name, think))
+        return {**REPLY, "content": GUIDED_ANSWER}
+
+    stored = pl.AnswerCache(reading_folder / demo.ANSWERS)
+    count = len(stored)
+    stored.close()
+    demo.live_check(reading_folder, guided_prompt(), model, ask=ask)
+    live = demo.live_check(reading_folder, guided_prompt(), model, ask=ask)
+    assert calls == [(model, False), (model, False)]
+    assert live["decision"] == N and live["score"] == 20 and live["same_version"]
+    stored = pl.AnswerCache(reading_folder / demo.ANSWERS)
+    assert len(stored) == count
+    stored.close()
+    kept = pl.AnswerCache(reading_folder / demo.LIVE_ANSWERS)
+    assert len(kept) == 1
+    kept.close()
+
+
+def test_a_live_check_says_when_the_model_version_changed(reading_folder, monkeypatch):
+    monkeypatch.setattr(demo, "installed_digest", lambda m: "a newer version")
+    live = demo.live_check(
+        reading_folder,
+        guided_prompt(),
+        MODEL_NAMES[0],
+        ask=lambda *a, **k: {**REPLY, "content": GUIDED_ANSWER},
+    )
+    assert not live["same_version"]
+
+
+def test_live_and_stored_answers_are_compared():
+    stored = {"decision": S, "confidence": 0.7, "score": 60}
+    assert "repeats" in demo.same_answer_text(stored, dict(stored))
+    changed = demo.same_answer_text(stored, {**stored, "score": 70})
+    assert "differs" in changed and "score" in changed and "decision" not in changed
+    assert "No stored answer" in demo.same_answer_text(None, stored)
+
+
+def test_the_guide_change_is_described():
+    assert demo.guide_change_text(S, S) == "The guide did not change the decision."
+    assert "from suspicious to not suspicious" in demo.guide_change_text(S, N)
+    assert demo.guide_change_text(None, S) is None
+
+
+def test_the_ml_view_has_no_label(reading_folder):
+    view = demo.ml_view(["c:1", "p:1"], demo.scores_directory())
+    assert list(view.columns) == ["score", "flag"]
+    assert view.index.tolist() == ["c:1", "p:1"]
+
+
+def test_a_live_run_is_estimated_from_measured_call_times():
+    gemma = demo.live_minutes(20, [MODEL_NAMES[0]])
+    assert gemma == pytest.approx((2 * 20 * 5 + 15) / 60)
+    both = demo.live_minutes(5, MODEL_NAMES)
+    assert both == pytest.approx((2 * 5 * 5 + 15 + 2 * 5 * 21 + 15) / 60)
+
+
+def test_a_fresh_run_starts_in_the_background(tmp_path):
+    commands = []
+
+    def popen(command, **kwargs):
+        commands.append((command, kwargs))
+
+    folder = demo.start_fresh_run(
+        tmp_path, 102, "full", [MODEL_NAMES[0]], accounts=20, live=True, popen=popen
+    )
+    command, kwargs = commands[0]
+    assert folder == tmp_path / "fresh_seed102_full"
+    assert command[1].endswith("run_fresh.py")
+    assert command[2:] == [
+        "--seed",
+        "102",
+        "--size",
+        "full",
+        "--models",
+        MODEL_NAMES[0],
+        "--live",
+        "--accounts",
+        "20",
+    ]
+    assert kwargs["cwd"] == demo.PROJECT_ROOT
+    kwargs["stdout"].close()
+    assert (folder / demo.LIVE_LOG).exists()
+    with pytest.raises(ValueError):
+        demo.start_fresh_run(tmp_path, 12, "mini", ["m"], popen=popen)
+
+
+def test_the_run_status_is_read_from_the_log(tmp_path):
+    log = tmp_path / demo.FRESH_LOG
+    assert demo.fresh_run_status(tmp_path) == ("not started", "")
+    log.write_text("answers: m\n  25/60  4.7s\n", encoding="utf-8")
+    assert demo.fresh_run_status(tmp_path) == ("running", "  25/60  4.7s")
+    log.write_text("Traceback (most recent call last):\nX\n", encoding="utf-8")
+    assert demo.fresh_run_status(tmp_path)[0] == "failed"
+    log.write_text("table\nfinished\n", encoding="utf-8")
+    assert demo.fresh_run_status(tmp_path) == ("finished", "finished")
+
+
+def test_a_result_row_becomes_an_opinion():
+    results = reading_results(DECISIONS)
+    opinion = demo.result_opinion(results, "c:1", pl.READ_SHOTS, MODEL_NAMES[0])
+    assert opinion["decision"] == N and opinion["score"] == 20.0
+    alone = demo.result_opinion(results, "c:1", pl.READ_ALONE, MODEL_NAMES[0])
+    assert alone["score"] is None
+    assert demo.result_opinion(results, "x", pl.READ_ALONE, MODEL_NAMES[0]) is None
+
+
+def test_the_guided_page_opens_without_labels(reading_folder):
+    app = run_app("Guided reading")
+    assert not app.exception
+    assert [t.value for t in app.title] == ["Guided reading"]
+    shown = " ".join(m.value for m in app.markdown)
+    assert "Reading alone" in shown and "With the guide and examples" in shown
+    assert "Gemma 4" in shown and "Qwen 3.5 9B" in shown
+    for account, group in READING_GROUPS.items():
+        assert account not in shown and group not in shown
+    assert all("label" not in frame.value.columns for frame in app.dataframe)
+    assert any("Every answer" in s.value for s in app.sidebar.success)
+    assert metric_of(app, "Score 0-100") == "20"
+
+
+def test_the_research_view_shows_the_stratum_and_the_readers(reading_folder):
+    app = run_app("Guided reading")
+    app.toggle(key="reading_research").set_value(True).run()
+    assert not app.exception
+    assert any("Stratum:" in i.value for i in app.info)
+    readers = app.dataframe[-1].value
+    assert "XGBoost transaction model" in readers["reader"].tolist()
+    assert any(name.endswith(pl.READ_SHOTS) for name in readers["reader"])
+
+
+def test_a_positive_counts_as_caught_only_if_both_models_catch_it():
+    results = reading_results(DECISIONS)
+    qwen = (results["model"] == MODEL_NAMES[1]) & (results["account"] == "p:1")
+    results.loc[qwen & (results["condition"] == pl.READ_SHOTS), "decision"] = N
+    chosen = demo.demo_cases(results, pd.Series(READING_GROUPS))
+    assert chosen.get("p:1") != "a positive caught with the guide"
+
+
+# How it is checked.
+
+
+def test_the_tests_of_the_repository_are_counted(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "def test_one():\n    pass\n\n\ndef helper():\n    pass\n\n\n"
+        "def test_two():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "conftest.py").write_text("def test_no(): pass\n")
+    assert demo.test_count(tmp_path) == 2
+    assert demo.test_count() > 200
+
+
+def test_the_last_mutation_run_is_read_if_saved(tmp_path):
+    assert demo.mutation_summary(tmp_path) is None
+    (tmp_path / demo.MUTATION_REPORT).write_text(
+        '{"date": "2026-11-18 10:00", "total": 3, "caught": 3, "missed": []}',
+        encoding="utf-8",
+    )
+    assert demo.mutation_summary(tmp_path)["caught"] == 3
+
+
+def test_the_assurance_table_names_what_each_step_guards_against():
+    table = demo.assurance_table()
+    assert list(table.columns) == ["What we did", "Guards against", "Where"]
+    assert table.notna().all().all() and len(table) >= 5
+
+
+def test_the_checks_page_opens_with_and_without_a_mutation_run(reading_folder):
+    app = run_app("How it is checked")
+    assert not app.exception
+    assert [t.value for t in app.title] == ["How it is checked"]
+    assert metric_of(app, "Planted mistakes caught") == "not run yet"
+    scores = demo.scores_directory()
+    (scores / demo.MUTATION_REPORT).write_text(
+        '{"date": "d", "total": 5, "caught": 4, "missed": ["x"]}', encoding="utf-8"
+    )
+    app = run_app("How it is checked")
+    assert metric_of(app, "Planted mistakes caught") == "4 of 5"
+    assert any("Missed: x" in w.value for w in app.warning)

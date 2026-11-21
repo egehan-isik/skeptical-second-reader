@@ -72,12 +72,22 @@ def reading_sample(
     in_file: pd.Series,
     seed: int,
     exclude: pd.Index | None = None,
+    n_per_pattern: int | None = None,
+    n_outside: int | None = None,
+    n_matched: int | None = None,
+    n_random_clean: int | None = None,
 ) -> pd.Series:
     """The stratum of every chosen account.
 
     `labels`, `activity` (transactions per account) and `in_file` share one index;
-    `patterns` is `account_patterns`. Accounts in `exclude` are never chosen.
+    `patterns` is `account_patterns`. Accounts in `exclude` are never chosen. The
+    sizes left at None are those of the two reading samples (the module constants);
+    a smaller sample keeps the same strata.
     """
+    n_per_pattern = PER_PATTERN if n_per_pattern is None else n_per_pattern
+    n_outside = OUTSIDE if n_outside is None else n_outside
+    n_matched = MATCHED if n_matched is None else n_matched
+    n_random_clean = RANDOM_CLEAN if n_random_clean is None else n_random_clean
     pool = labels.index if exclude is None else labels.index.difference(exclude)
     positive = labels[pool] == 1
     known = patterns.reindex(pool)
@@ -85,17 +95,17 @@ def reading_sample(
     for kind in sorted(patterns.unique()):
         members = pool[positive & (known == kind)]
         parts.append(
-            pd.Series(pattern_stratum(kind), index=_take(members, PER_PATTERN, seed))
+            pd.Series(pattern_stratum(kind), index=_take(members, n_per_pattern, seed))
         )
     outside = pool[positive & ~in_file[pool]]
-    parts.append(pd.Series(OUTSIDE_NAME, index=_take(outside, OUTSIDE, seed)))
+    parts.append(pd.Series(OUTSIDE_NAME, index=_take(outside, n_outside, seed)))
     chosen = pd.concat(parts)
     clean = pool[~positive & ~in_file[pool]]
-    targets = _take(chosen.index, MATCHED, seed)
+    targets = _take(chosen.index, n_matched, seed)
     matched = _matched(targets, activity, clean, seed)
     parts.append(pd.Series(MATCHED_NAME, index=matched))
     rest = clean.difference(matched)
-    parts.append(pd.Series(RANDOM_NAME, index=_take(rest, RANDOM_CLEAN, seed)))
+    parts.append(pd.Series(RANDOM_NAME, index=_take(rest, n_random_clean, seed)))
     return pd.concat(parts).rename("stratum")
 
 
@@ -113,3 +123,39 @@ def reading_samples(
     used = dev.index if exclude is None else dev.index.union(exclude)
     test = reading_sample(labels, activity, patterns, in_file, test_seed, used)
     return dev, test
+
+
+SHOT_CLEAN_NAME = "clean example"
+
+
+def shot_sample(
+    labels: pd.Series,
+    activity: pd.Series,
+    patterns: pd.Series,
+    in_file: pd.Series,
+    kinds: list[str],
+    n_clean: int,
+    seed: int,
+    exclude: pd.Index,
+) -> pd.Series:
+    """Accounts for the solved examples: one positive of each pattern type in `kinds`
+    and `n_clean` clean accounts as busy as them.
+
+    `exclude` must hold both reading samples and the accounts of earlier experiments,
+    so no example is an account the reader is asked about.
+    """
+    pool = labels.index.difference(exclude)
+    positive = labels[pool] == 1
+    known = patterns.reindex(pool)
+    parts = []
+    for kind in kinds:
+        candidates = pool[positive & (known == kind)]
+        if len(candidates) == 0:
+            raise ValueError(f"no positive of type {kind} left")
+        parts.append(pd.Series(pattern_stratum(kind), index=_take(candidates, 1, seed)))
+    chosen = pd.concat(parts)
+    clean_pool = pool[~positive & ~in_file[pool].to_numpy()]
+    targets = pd.Index(np.resize(chosen.index.to_numpy(), n_clean))
+    matched = _matched(targets, activity, clean_pool, seed)
+    parts.append(pd.Series(SHOT_CLEAN_NAME, index=matched))
+    return pd.concat(parts).rename("stratum")

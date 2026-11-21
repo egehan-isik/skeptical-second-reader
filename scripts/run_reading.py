@@ -4,6 +4,11 @@ Run from the project root, after notebook 13:
 
     uv run python scripts/run_reading.py --sample dev
     uv run python scripts/run_reading.py --sample test
+    uv run python scripts/run_reading.py --sample dev --guided
+
+`--guided` asks with the guide, the facts beside the other accounts and, in the second
+condition, the solved examples (notebook 15). Its prompts and results are separate
+files, so the first reading test stays as it was.
 
 Prompts and answers go to data/interim/reading, which is not in the repository.
 Answers are cached one by one, so a stopped run continues where it stopped, and the
@@ -16,7 +21,7 @@ import argparse
 import pandas as pd
 from run_pipeline import DEFAULT_MODELS, THINK, model_digest, report, unload
 
-from skeptical_second_reader import pipeline
+from skeptical_second_reader import guide, pipeline
 from skeptical_second_reader.data import load_transactions
 from skeptical_second_reader.paths import DATA_INTERIM
 from skeptical_second_reader.transactions import transaction_table
@@ -25,6 +30,24 @@ SAMPLES = {
     "dev": "reading_dev_cases.parquet",
     "test": "reading_test_cases.parquet",
 }
+SHOT_SEED = 15
+
+
+def guided_inputs(facts: pd.DataFrame) -> dict:
+    """The guide, the examples and the reference values (`guide.guided_inputs`)."""
+    reading = pd.read_parquet(DATA_INTERIM / "transaction_reading.parquet")
+    activity = pd.read_parquet(DATA_INTERIM / "ceiling_features.parquet")[
+        "transactions"
+    ]
+    samples = pd.Index([])
+    for name in SAMPLES.values():
+        samples = samples.union(pd.read_parquet(DATA_INTERIM / name).index)
+    used = pd.read_parquet(DATA_INTERIM / "llm_experiment_cases.parquet").index.union(
+        pd.read_parquet(DATA_INTERIM / "llm_trial_cases.parquet").index
+    )
+    return guide.guided_inputs(
+        facts, reading["label"], activity, samples, used, SHOT_SEED
+    )
 
 
 def main() -> int:
@@ -35,14 +58,22 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="prompts per model")
     parser.add_argument(
         "--conditions",
-        default=f"{pipeline.READ_ALONE},{pipeline.READ_FACTS}",
-        help="comma-separated; the alone prompt never changes, the facts prompt may",
+        default=None,
+        help="comma-separated; by default both conditions of the chosen prompts",
     )
+    parser.add_argument("--guided", action="store_true")
     args = parser.parse_args()
+    if args.conditions is None:
+        args.conditions = (
+            f"{pipeline.READ_GUIDE},{pipeline.READ_SHOTS}"
+            if args.guided
+            else f"{pipeline.READ_ALONE},{pipeline.READ_FACTS}"
+        )
 
     out = DATA_INTERIM / "reading"
     out.mkdir(exist_ok=True)
-    prompts_path = out / f"prompts_{args.sample}.parquet"
+    suffix = "_guided" if args.guided else ""
+    prompts_path = out / f"prompts_{args.sample}{suffix}.parquet"
     if not prompts_path.exists():
         table = transaction_table(load_transactions())
         pair_count = (
@@ -50,7 +81,8 @@ def main() -> int:
         )
         cases = pd.read_parquet(DATA_INTERIM / SAMPLES[args.sample])["stratum"]
         facts = pd.read_parquet(DATA_INTERIM / "account_facts.parquet")
-        prompts = pipeline.reading_prompts(table, pair_count, cases, facts)
+        extra = guided_inputs(facts) if args.guided else {}
+        prompts = pipeline.reading_prompts(table, pair_count, cases, facts, **extra)
         pipeline.save_parquet(prompts, prompts_path)
         print(f"prompts: {len(prompts)} written", flush=True)
     prompts = pd.read_parquet(prompts_path)
@@ -78,7 +110,9 @@ def main() -> int:
             if len(cache) > before:
                 unload(name)
             results = pd.concat(parts, ignore_index=True)
-            pipeline.save_parquet(results, out / f"results_{args.sample}.parquet")
+            pipeline.save_parquet(
+                results, out / f"results_{args.sample}{suffix}.parquet"
+            )
     finally:
         cache.close()
     print("finished", flush=True)

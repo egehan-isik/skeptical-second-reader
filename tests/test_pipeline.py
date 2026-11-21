@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from skeptical_second_reader import facts as fx
 from skeptical_second_reader import pipeline as pl
 from skeptical_second_reader import second_reader as sr
 from skeptical_second_reader.facts import FACTS
@@ -280,3 +281,68 @@ def test_the_reading_test_alone_is_the_first_experiment_k1_prompt():
     assert text.index("FACTS COMPUTED") < text.index("Answer ONLY with JSON")
     assert "UPSTREAM" not in text
     assert reading_test["shown_level"].isna().all()
+
+
+def test_guided_reading_prompts_add_context_guide_examples_and_score():
+    table, features, reading, shap, cases = two_accounts()
+    facts = pd.DataFrame({name: [1.0, 2.0] for name in FACTS}, index=["1:A", "2:B"])
+    pair_count = features["pair_count"].to_numpy()
+    plain = pl.reading_prompts(table, pair_count, cases, facts)
+    percentiles = fx.fact_percentiles(facts, facts)
+    with pytest.raises(ValueError):
+        pl.reading_prompts(table, pair_count, cases, facts, guide="GUIDE")
+    only_guide = pl.reading_prompts(
+        table, pair_count, cases, facts, guide="GUIDE", percentiles=percentiles
+    )
+    assert set(only_guide["condition"]) == {pl.READ_GUIDE}
+    guided = pl.reading_prompts(
+        table,
+        pair_count,
+        cases,
+        facts,
+        guide="GUIDE",
+        shots="SHOTS",
+        percentiles=percentiles,
+    )
+    assert len(guided) == 2 * 2
+    assert set(guided["condition"]) == {pl.READ_GUIDE, pl.READ_SHOTS}
+    by = guided.set_index(["condition", "account"])["prompt"]
+    with_facts = plain[plain["condition"] == pl.READ_FACTS].set_index("account")
+    for account in ["1:A", "2:B"]:
+        g = by[(pl.READ_GUIDE, account)]
+        s = by[(pl.READ_SHOTS, account)]
+        assert "GUIDE" in g and "SHOTS" not in g and "SHOTS" in s
+        assert "HOW THESE FACTS COMPARE" in g
+        assert g.index("FACTS COMPUTED") < g.index("HOW THESE FACTS COMPARE")
+        assert g.index("HOW THESE FACTS COMPARE") < g.index("Answer ONLY")
+        assert '"score"' in g and '"score"' in s
+        assert s.replace("SHOTS\n\n", "") == g
+        # Without the guide, the comparison and the score, it is the facts prompt.
+        old = with_facts.loc[account, "prompt"]
+        start = g.index("\n\nHOW THESE FACTS")
+        comparison = g[start : g.index("\n\nAnswer ONLY")]
+        rebuilt = g.replace("GUIDE\n\n", "").replace(comparison, "")
+        assert rebuilt.replace(sr.SCORE_LINE, "") == old
+    lower = percentiles[0].loc["2:B", "payers"]
+    assert f"higher than {lower * 100:.0f}% of accounts" in by[(pl.READ_GUIDE, "2:B")]
+
+
+def test_guided_reading_prompts_give_each_account_its_own_typical_range():
+    table, features, reading, shap, cases = two_accounts()
+    facts = pd.DataFrame({name: [1.0, 2.0] for name in FACTS}, index=["1:A", "2:B"])
+    pair_count = features["pair_count"].to_numpy()
+    percentiles = fx.fact_percentiles(facts, facts)
+    low = pd.DataFrame({name: [3.0, 5.0] for name in FACTS}, index=facts.index)
+    high = low + 4
+    prompts = pl.reading_prompts(
+        table,
+        pair_count,
+        cases,
+        facts,
+        guide="GUIDE",
+        percentiles=percentiles,
+        typical=(low, high),
+    ).set_index("account")["prompt"]
+    assert "typical for clean accounts as busy as A: 3 to 7." in prompts["1:A"]
+    assert "typical for clean accounts as busy as A: 5 to 9." in prompts["2:B"]
+    assert "3 to 7" not in prompts["2:B"]

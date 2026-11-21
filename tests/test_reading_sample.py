@@ -93,3 +93,53 @@ def test_dev_and_test_samples_are_disjoint_and_skip_excluded(small):
     assert not set(dev.index) & set(test.index)
     assert not set(excluded) & (set(dev.index) | set(test.index))
     assert len(dev) == len(test) == 3 * 3 + 2 + 4 + 5
+
+
+def test_shot_examples_are_new_accounts_of_the_asked_kinds(small):
+    labels, activity, patterns, in_file = small
+    dev, test = rs.reading_samples(labels, activity, patterns, in_file, 0, 1)
+    used = dev.index.union(test.index)
+    shots = rs.shot_sample(
+        labels, activity, patterns, in_file, ["CYCLE", "STACK"], 2, 3, used
+    )
+    assert len(shots) == 4
+    assert not set(shots.index) & set(used)
+    for kind in ["CYCLE", "STACK"]:
+        picked = shots[shots == rs.pattern_stratum(kind)].index
+        assert len(picked) == 1
+        assert labels[picked].eq(1).all()
+        assert (patterns[picked] == kind).all()
+    clean = shots[shots == rs.SHOT_CLEAN_NAME].index
+    assert labels[clean].eq(0).all()
+    assert not in_file[clean].any()
+
+
+def test_shot_clean_examples_match_the_activity_of_the_positives(small):
+    labels, activity, patterns, in_file = small
+    shots = rs.shot_sample(
+        labels, activity, patterns, in_file, ["FAN-IN"], 1, 0, pd.Index([])
+    )
+    positive = shots[shots != rs.SHOT_CLEAN_NAME].index[0]
+    clean = shots[shots == rs.SHOT_CLEAN_NAME].index[0]
+    assert activity[clean] == activity[positive]
+
+
+def test_shot_sample_fails_when_a_kind_has_no_positive_left(small):
+    labels, activity, patterns, in_file = small
+    with pytest.raises(ValueError):
+        rs.shot_sample(
+            labels, activity, patterns, in_file, ["RANDOM"], 1, 0, pd.Index([])
+        )
+
+
+def test_excluded_accounts_are_never_examples(small):
+    labels, activity, patterns, in_file = small
+    cycle = patterns[patterns == "CYCLE"].index
+    keep = cycle[-1]
+    clean = labels[(labels == 0) & ~in_file].index
+    exclude = cycle.drop(keep).union(clean[:-1])
+    for seed in range(5):
+        shots = rs.shot_sample(
+            labels, activity, patterns, in_file, ["CYCLE"], 1, seed, exclude
+        )
+        assert list(shots.index) == [keep, clean[-1]]
