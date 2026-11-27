@@ -5,9 +5,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from skeptical_second_reader import demo
+from skeptical_second_reader import demo, fresh
 from skeptical_second_reader import pipeline as pl
 from skeptical_second_reader import second_reader as sr
 
@@ -374,8 +375,8 @@ def test_the_research_view_shows_every_condition_and_warns(folder):
     shown.set_value("No ML output (the reader alone)").run()
     assert not app.exception
     assert any("Hidden in this condition" in m.value for m in app.markdown)
-    app.sidebar.selectbox[0].set_value("Corrupted ML output, 100%").run()
-    assert any("deliberately corrupted" in w.value for w in app.warning)
+    app.sidebar.selectbox[0].set_value("Reversed ML output, 100%").run()
+    assert any("deliberately reversed" in w.value for w in app.warning)
 
 
 # The reading test page.
@@ -751,9 +752,13 @@ def test_the_assurance_table_names_what_each_step_guards_against():
     assert table.notna().all().all() and len(table) >= 5
 
 
-def test_the_checks_page_opens_with_and_without_a_mutation_run(reading_folder):
+def test_the_checks_page_opens_with_and_without_a_mutation_run(
+    reading_folder, monkeypatch
+):
+    monkeypatch.setattr(demo, "collected_tests", lambda: 279)
     app = run_app("How it is checked")
     assert not app.exception
+    assert metric_of(app, "Tests") == "279"
     assert [t.value for t in app.title] == ["How it is checked"]
     assert metric_of(app, "Planted mistakes caught") == "not run yet"
     scores = demo.scores_directory()
@@ -763,3 +768,323 @@ def test_the_checks_page_opens_with_and_without_a_mutation_run(reading_folder):
     app = run_app("How it is checked")
     assert metric_of(app, "Planted mistakes caught") == "4 of 5"
     assert any("Missed: x" in w.value for w in app.warning)
+
+
+# The live run page.
+
+
+def test_a_live_run_records_its_plan_and_starts_a_new_answers_file(tmp_path):
+    folder = tmp_path / "fresh_seed102_full"
+    folder.mkdir()
+    (folder / fresh.LIVE_ANSWERS).write_text("old run\n", encoding="utf-8")
+
+    def popen(command, **kwargs):
+        kwargs["stdout"].close()
+
+    demo.start_fresh_run(
+        tmp_path, 102, "full", MODEL_NAMES, accounts=3, live=True, popen=popen
+    )
+    assert not (folder / fresh.LIVE_ANSWERS).exists()
+    plan = demo.live_plan(folder)
+    assert plan == {"models": MODEL_NAMES, "accounts": 3}
+    assert demo.expected_answers(plan) == 12
+    assert demo.expected_answers({"models": ["m"], "accounts": None}) is None
+    assert demo.expected_answers(None) is None
+
+
+def test_the_log_tail_keeps_the_last_lines(tmp_path):
+    assert demo.log_tail(tmp_path) == ""
+    lines = "\n".join(f"line {i}" for i in range(20))
+    (tmp_path / demo.LIVE_LOG).write_text(lines + "\n\n", encoding="utf-8")
+    assert demo.log_tail(tmp_path, lines=3) == "line 17\nline 18\nline 19"
+
+
+def test_reader_names_are_written_out():
+    models = {MODEL_NAMES[0]: "Gemma 4", MODEL_NAMES[1]: "Qwen 3.5 9B"}
+    assert demo.reader_name("gemma4 " + pl.READ_ALONE, models) == "Gemma 4, alone"
+    shots = "qwen3.5 " + pl.READ_SHOTS
+    assert demo.reader_name(shots, models) == "Qwen 3.5 9B, with the guide"
+    xgb = "XGBoost transaction model"
+    assert demo.reader_name(xgb, models) == xgb
+
+
+def test_live_answers_are_shown_with_case_names_and_no_accounts():
+    answers = pd.DataFrame(
+        {
+            "time": ["10:00:01", "10:00:05"],
+            "model": [MODEL_NAMES[0]] * 2,
+            "account": ["p:1", "c:1"],
+            "condition": [pl.READ_ALONE, pl.READ_SHOTS],
+            "decision": [S, None],
+            "confidence": [0.8, None],
+            "seconds": [4.04, 5.0],
+            "source": ["live", "live"],
+        }
+    )
+    cases = pd.DataFrame(
+        {"case": ["Reading 001", "Reading 002"], "account": ["p:1", "c:1"]}
+    )
+    table = demo.live_answer_table(answers, cases, {MODEL_NAMES[0]: "Gemma 4"})
+    assert table["case"].tolist() == ["Reading 002", "Reading 001"]  # newest first
+    assert table["decision"].tolist() == ["no usable answer", "suspicious"]
+    assert table["reading"].tolist() == ["with the guide", "alone"]
+    assert set(table["model"]) == {"Gemma 4"}
+    assert "account" not in table.columns and "p:1" not in table.to_string()
+
+
+def test_the_outputs_of_a_live_run_are_listed(tmp_path):
+    folder = tmp_path / "fresh_seed102_full"
+    folder.mkdir()
+    (folder / demo.LIVE_LOG).write_text("finished\n", encoding="utf-8")
+    table = demo.live_outputs(folder)
+    assert list(table.columns) == ["file", "holds", "last written"]
+    written = dict(zip(table["file"], table["last written"], strict=True))
+    log = next(name for name in written if name.endswith(demo.LIVE_LOG))
+    assert written[log] != "not yet"
+    assert any(name.endswith("live_answers.sqlite") for name in written)
+    assert sum(value == "not yet" for value in written.values()) == 4
+
+
+def test_full_reversal_is_counted_per_group_where_the_output_is_wrong():
+    reading = pd.DataFrame({"label": [1, 1, 0, 1]}, index=["a", "b", "c", "d"])
+    rows = []
+
+    def add(account, group, condition, decision, level=None):
+        rows.append(
+            {
+                "model": "m",
+                "account": account,
+                "group": group,
+                "condition": condition,
+                "decision": decision,
+                "shown_level": level,
+            }
+        )
+
+    right = "strong, model right"
+    clean = "not flagged, clean"
+    missed = "missed, outside the file"
+    # a and b are right alone; the reversed output says not flagged, which is wrong.
+    add("a", right, sr.K1, S)
+    add("a", right, sr.K3_D100, N, sr.NOT_FLAGGED)
+    add("b", right, sr.K1, S)
+    add("b", right, sr.K3_D100, S, sr.NOT_FLAGGED)
+    # c is wrong alone, so it is not counted.
+    add("c", clean, sr.K1, S)
+    add("c", clean, sr.K3_D100, S, sr.STRONG)
+    # d: the ML model missed it, so the reversed output (an alert) is right.
+    add("d", missed, sr.K1, S)
+    add("d", missed, sr.K3_D100, S, sr.STRONG)
+    table = demo.reversal_table(pd.DataFrame(rows), reading)
+    table = table.set_index("ML outcome group")
+    assert table.loc[right, "m"] == "1 of 2"
+    assert table.loc[right, "shown after reversal"] == "not flagged"
+    assert table.loc[clean, "m"] == "0 of 0"
+    assert table.loc[clean, "shown after reversal"] == "alert"
+    assert table.loc[missed, "m"] == "output right: not counted"
+    assert table.loc["Total", "m"] == "1 of 2"
+    assert "uncertain, model right" not in table.index
+
+
+def test_the_collected_tests_are_read_from_pytest():
+    class Done:
+        stdout = "a\nb\n279 tests collected in 4.9s\n"
+
+    class Nothing:
+        stdout = "error"
+
+    def broken(*args, **kwargs):
+        raise OSError("no python")
+
+    assert demo.collected_tests(run=lambda *a, **k: Done()) == 279
+    assert demo.collected_tests(run=lambda *a, **k: Nothing()) is None
+    assert demo.collected_tests(run=broken) is None
+
+
+def test_the_experiment_page_shows_the_groups_when_the_run_is_complete(folder):
+    rows = []
+    cases = [
+        ("1:A", "strong, model right", S, sr.NOT_FLAGGED),
+        ("2:B", "not flagged, clean", N, sr.STRONG),
+    ]
+    for model in MODEL_NAMES:
+        for account, group, alone, reversed_level in cases:
+            for condition in sr.CONDITIONS:
+                full = condition == sr.K3_D100
+                rows.append(
+                    {
+                        "model": model,
+                        "account": account,
+                        "group": group,
+                        "condition": condition,
+                        "shown_level": reversed_level if full else None,
+                        # Right alone, and follows the reversed output.
+                        "decision": (S if alone == N else N) if full else alone,
+                    }
+                )
+    pd.DataFrame(rows).to_parquet(folder / demo.RESULTS)
+    app = run_app("Experiment")
+    assert not app.exception
+    assert any("Every answer is stored" in s.value for s in app.success)
+    groups = next(
+        f.value for f in app.dataframe if "ML outcome group" in f.value.columns
+    )
+    total = groups.set_index("ML outcome group").loc["Total"]
+    assert total["Gemma 4"] == "2 of 2" and total["Qwen 3.5 9B"] == "2 of 2"
+
+
+def test_the_run_page_without_a_pool_says_how_to_build_it(reading_folder):
+    app = run_app("Run new accounts")
+    assert not app.exception
+    assert any("--prepare" in i.value for i in app.info)
+
+
+def test_the_run_page_shows_a_finished_run_without_labels(reading_folder):
+    pool = reading_folder / "fresh_seed102_full"
+    pool.mkdir()
+    prompts = reading_rows(pl.READ_ALONE) + reading_rows(pl.READ_SHOTS)
+    pd.DataFrame(prompts).to_parquet(pool / "prompts.parquet")
+    for account in ["p:1", "c:1"]:
+        for condition in (pl.READ_ALONE, pl.READ_SHOTS):
+            fresh.append_live_answer(
+                pool / fresh.LIVE_ANSWERS,
+                {
+                    "time": "10:00:00",
+                    "model": MODEL_NAMES[0],
+                    "account": account,
+                    "condition": condition,
+                    "decision": S,
+                    "confidence": 0.8,
+                    "seconds": 4.0,
+                    "source": "live",
+                },
+            )
+    log = "step 1/4  accounts\nfinished\n"
+    (pool / demo.LIVE_LOG).write_text(log, encoding="utf-8")
+    pd.DataFrame(
+        {"reader": ["gemma4 K1"], "accounts": [2], "AUC-ROC": [1.0], "recall": [1.0]}
+    ).to_csv(pool / demo.LIVE_SUMMARY, index=False)
+    app = run_app("Run new accounts")
+    assert not app.exception
+    assert any("finished" in s.value for s in app.success)
+    frames = [f.value for f in app.dataframe]
+    assert any("decision" in f.columns and len(f) == 4 for f in frames)
+    assert any("XGBoost score" in f.columns for f in frames)
+    assert any("reader" in f.columns for f in frames)
+    assert any("holds" in f.columns for f in frames)
+    shown = " ".join(f.to_string() for f in frames)
+    shown += " ".join(m.value for m in app.markdown)
+    for account, group in READING_GROUPS.items():
+        assert account not in shown and group not in shown
+
+
+def test_ml_overview_pools_precision_and_recall_and_averages_auc_pr_over_folds():
+    reading = pd.DataFrame(
+        {
+            "score": [0.9, 0.1, 0.8, 0.2, 0.7, 0.3],
+            "flag": [1, 0, 1, 1, 0, 0],
+            "label": [1, 0, 1, 0, 1, 0],
+            "fold": [0, 0, 1, 1, 1, 1],
+        }
+    )
+    row = demo.ml_overview(reading).iloc[0]
+    assert row["accounts"] == 6 and row["positives"] == 3 and row["flagged"] == 3
+    assert row["precision"] == pytest.approx(2 / 3)
+    assert row["recall"] == pytest.approx(2 / 3)
+    # Each fold ranks its positives first, so both folds reach 1.
+    assert row["AUC-PR (mean of folds)"] == pytest.approx(1.0)
+
+
+def test_reversal_by_direction_splits_the_total_by_the_wrong_output_shown():
+    rows = []
+    # Positive shown 'not flagged' and follows; clean shown 'alert' and resists.
+    for account, alone, shown, answer in [
+        ("1:A", S, sr.NOT_FLAGGED, N),
+        ("2:B", N, sr.STRONG, N),
+    ]:
+        rows.append(
+            {
+                "model": "m",
+                "account": account,
+                "condition": sr.K1,
+                "decision": alone,
+                "shown_level": None,
+            }
+        )
+        rows.append(
+            {
+                "model": "m",
+                "account": account,
+                "condition": sr.K3_D100,
+                "decision": answer,
+                "shown_level": shown,
+            }
+        )
+    reading = pd.DataFrame({"label": [1, 0]}, index=["1:A", "2:B"])
+    table = demo.reversal_by_direction(pd.DataFrame(rows), reading)
+    table = table.set_index("wrong output shown")["m"]
+    assert table.iloc[0] == "1 of 1"
+    assert table.iloc[1] == "0 of 1"
+    assert table.loc["Total"] == "1 of 2"
+
+
+def test_reader_metrics_adds_precision_and_the_number_called_suspicious():
+    strata = pd.Series(
+        ["pattern CYCLE", "pattern CYCLE", fresh.CLEAN[0], fresh.CLEAN[1]],
+        index=["a", "b", "c", "d"],
+    )
+    readers = {
+        "r": (
+            pd.Series([0.9, 0.2, 0.8, 0.1], index=strata.index),
+            pd.Series([True, False, True, False], index=strata.index),
+        )
+    }
+    row = demo.reader_metrics(strata, readers).iloc[0]
+    assert row["called suspicious"] == 2
+    assert row["precision"] == pytest.approx(0.5)
+    assert row["recall"] == pytest.approx(0.5)
+    assert row["false alarm rate"] == pytest.approx(0.5)
+
+
+def test_suspicious_share_is_the_share_called_suspicious_per_stratum():
+    results = pd.DataFrame(
+        {
+            "model": ["m"] * 3,
+            "condition": [pl.READ_ALONE] * 3,
+            "account": ["a", "b", "c"],
+            "decision": [S, N, S],
+        }
+    )
+    strata = pd.Series(["x", "x", "y"], index=["a", "b", "c"])
+    table = demo.suspicious_share(results, strata)
+    assert table.loc["x", ("m", pl.READ_ALONE)] == pytest.approx(0.5)
+    assert table.loc["y", ("m", pl.READ_ALONE)] == pytest.approx(1.0)
+
+
+def test_the_experiment_page_opens_without_scores_or_reading_files(
+    folder, tmp_path, monkeypatch
+):
+    # The page caches its tables; another test may have filled the cache.
+    st.cache_data.clear()
+    empty = tmp_path / "nothing"
+    empty.mkdir()
+    monkeypatch.setenv(demo.SCORES_VARIABLE, str(empty))
+    monkeypatch.setenv(demo.READING_VARIABLE, str(empty))
+    rows = [
+        {
+            "model": m,
+            "account": a,
+            "condition": c,
+            "decision": S,
+            "group": "g",
+            "shown_level": sr.NOT_FLAGGED,
+        }
+        for m in MODEL_NAMES
+        for a in ["1:A", "2:B"]
+        for c in sr.CONDITIONS
+    ]
+    pd.DataFrame(rows).to_parquet(folder / demo.RESULTS)
+    app = run_app("Experiment")
+    assert not app.exception
+    assert any("ML scores are not found" in i.value for i in app.info)
+    assert any("reading test are not found" in i.value for i in app.info)

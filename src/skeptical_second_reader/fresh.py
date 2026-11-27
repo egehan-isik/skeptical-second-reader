@@ -9,6 +9,9 @@ out-of-fold scores, so no account is scored by a model that trained on it) and t
 local LLMs, alone and with the guide.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
@@ -108,6 +111,40 @@ def reader_table(strata: pd.Series, readers: dict) -> pd.DataFrame:
 
 
 LIVE_ORDER_SEED = 0
+# One line per answer of the running live run, written as it comes, so that a page
+# can show the run while it works. Each run starts the file again.
+LIVE_ANSWERS = "run_live_answers.jsonl"
+LIVE_FIELDS = [
+    "time",
+    "model",
+    "account",
+    "condition",
+    "decision",
+    "confidence",
+    "seconds",
+    "source",
+]
+
+
+def append_live_answer(path: Path, row: dict) -> None:
+    """Add one answer to the file of the running live run."""
+    record = {field: row.get(field) for field in LIVE_FIELDS}
+    with Path(path).open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record) + "\n")
+
+
+def read_live_answers(path: Path) -> pd.DataFrame:
+    """The answers of the running live run so far; a line still being written is
+    left out."""
+    path = Path(path)
+    rows = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return pd.DataFrame(rows, columns=LIVE_FIELDS)
 
 
 def live_order(strata: pd.Series) -> list:

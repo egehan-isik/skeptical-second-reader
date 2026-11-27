@@ -111,3 +111,29 @@ def test_the_ml_readers_use_the_stored_scores_and_flags():
     assert flag.to_dict() == {"p1": False, "c1": True}
     score, flag = readers["XGBoost ceiling (evidence and facts)"]
     assert flag.to_dict() == {"p1": True, "c1": False}
+
+
+def test_live_answers_are_read_back_as_they_were_written(tmp_path):
+    path = tmp_path / fresh.LIVE_ANSWERS
+    assert fresh.read_live_answers(path).empty
+    row = {
+        "model": "m",
+        "account": "p1",
+        "condition": READ_ALONE,
+        "decision": None,
+        "confidence": None,
+        "seconds": 4.5,
+        "source": "live",
+        "time": "10:00:00",
+        "group": "pattern CYCLE",
+    }
+    fresh.append_live_answer(path, row)
+    fresh.append_live_answer(path, {**row, "condition": READ_SHOTS})
+    # A line the run is still writing is left out, not an error.
+    with path.open("a", encoding="utf-8") as file:
+        file.write('{"model": "m", "acc')
+    answers = fresh.read_live_answers(path)
+    assert answers["condition"].tolist() == [READ_ALONE, READ_SHOTS]
+    assert list(answers.columns) == fresh.LIVE_FIELDS
+    # The stratum would reveal the label, so it is never written.
+    assert "group" not in path.read_text(encoding="utf-8")

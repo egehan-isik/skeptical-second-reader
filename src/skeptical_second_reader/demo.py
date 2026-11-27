@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import average_precision_score
 
 from skeptical_second_reader import fresh
 from skeptical_second_reader import pipeline as pl
@@ -277,6 +278,142 @@ def dose_table(results: pd.DataFrame, reading: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def reversal_table(results: pd.DataFrame, reading: pd.DataFrame) -> pd.DataFrame:
+    """Full reversal per ML outcome group, as in the report (notebook 11).
+
+    Counted are the accounts a model decides correctly alone (K1) and whose reversed
+    output (K3 at 100%) is wrong, with a valid answer there; each cell says how many
+    of them changed to the wrong answer. In a group where the ML model is wrong the
+    reversed output is right, so nothing is counted there.
+    """
+    truth = reading["label"].map({1: sr.SUSPICIOUS, 0: sr.NOT_SUSPICIOUS})
+    frame = results.assign(truth=results["account"].map(truth))
+    models = list(frame["model"].drop_duplicates())
+    totals = {model: [0, 0] for model in models}
+    rows = []
+    for group in sr.GROUP_NAMES:
+        part = frame[frame["group"] == group]
+        if part.empty:
+            continue
+        full = part[part["condition"] == sr.K3_D100]
+        shown = np.where(
+            full["shown_level"] == sr.NOT_FLAGGED, sr.NOT_SUSPICIOUS, sr.SUSPICIOUS
+        )
+        wrong_output = full[shown != full["truth"].to_numpy()]
+        row = {
+            "ML outcome group": group,
+            "shown after reversal": (
+                "not flagged"
+                if (full["shown_level"] == sr.NOT_FLAGGED).all()
+                else "alert"
+            ),
+        }
+        for model in models:
+            alone = part[(part["model"] == model) & (part["condition"] == sr.K1)]
+            right = set(alone.loc[alone["decision"] == alone["truth"], "account"])
+            counted = wrong_output[
+                (wrong_output["model"] == model)
+                & wrong_output["account"].isin(right)
+                & wrong_output["decision"].notna()
+            ]
+            if wrong_output.empty:
+                row[model] = "output right: not counted"
+                continue
+            k = int((counted["decision"] != counted["truth"]).sum())
+            row[model] = f"{k} of {len(counted)}"
+            totals[model][0] += k
+            totals[model][1] += len(counted)
+        rows.append(row)
+    total = {"ML outcome group": "Total", "shown after reversal": ""}
+    total |= {model: f"{k} of {n}" for model, (k, n) in totals.items()}
+    return pd.DataFrame([*rows, total])
+
+
+def ml_overview(reading: pd.DataFrame) -> pd.DataFrame:
+    """The ML model on all accounts, out-of-fold, at its own threshold: AUC-PR as mean
+    and standard deviation over the five test folds, precision and recall pooled."""
+    y, flag = reading["label"].astype(bool), reading["flag"].astype(bool)
+    per_fold = [
+        average_precision_score(part["label"], part["score"])
+        for _, part in reading.groupby("fold")
+    ]
+    return pd.DataFrame(
+        [
+            {
+                "accounts": len(reading),
+                "positives": int(y.sum()),
+                "positive rate": y.mean(),
+                "flagged": int(flag.sum()),
+                "AUC-PR (mean of folds)": float(np.mean(per_fold)),
+                "AUC-PR (SD of folds)": float(np.std(per_fold, ddof=1)),
+                "precision": (flag & y).sum() / flag.sum(),
+                "recall": (flag & y).sum() / y.sum(),
+            }
+        ]
+    )
+
+
+def reversal_by_direction(results: pd.DataFrame, reading: pd.DataFrame) -> pd.DataFrame:
+    """The counts of `reversal_table`, by the direction of the wrong output shown."""
+    truth = reading["label"].map({1: sr.SUSPICIOUS, 0: sr.NOT_SUSPICIOUS})
+    frame = results.assign(truth=results["account"].map(truth))
+    full = frame[frame["condition"] == sr.K3_D100]
+    shown = np.where(
+        full["shown_level"] == sr.NOT_FLAGGED, sr.NOT_SUSPICIOUS, sr.SUSPICIOUS
+    )
+    wrong_output = full[(shown != full["truth"].to_numpy()) & full["decision"].notna()]
+    directions = {
+        sr.NOT_SUSPICIOUS: "'not flagged' shown for a positive account",
+        sr.SUSPICIOUS: "'alert' shown for a clean account",
+    }
+    rows = {name: {"wrong output shown": name} for name in directions.values()}
+    total = {"wrong output shown": "Total"}
+    for model, part in frame.groupby("model", sort=False):
+        alone = part[part["condition"] == sr.K1]
+        right = set(alone.loc[alone["decision"] == alone["truth"], "account"])
+        counted = wrong_output[
+            (wrong_output["model"] == model) & wrong_output["account"].isin(right)
+        ]
+        turned = counted["decision"] != counted["truth"]
+        side = counted["truth"].map(
+            {sr.SUSPICIOUS: sr.NOT_SUSPICIOUS, sr.NOT_SUSPICIOUS: sr.SUSPICIOUS}
+        )
+        for key, name in directions.items():
+            mask = side == key
+            rows[name][model] = f"{int(turned[mask].sum())} of {int(mask.sum())}"
+        total[model] = f"{int(turned.sum())} of {len(counted)}"
+    return pd.DataFrame([*rows.values(), total])
+
+
+def reader_metrics(strata: pd.Series, readers: dict) -> pd.DataFrame:
+    """`fresh.reader_table` with precision and the number of accounts called
+    suspicious. Precision depends on the sample's share of positives."""
+    table = fresh.reader_table(strata, readers)
+    truth = fresh.truth_of(strata)
+    flagged, precision = [], []
+    for _, flag in readers.values():
+        y = truth.loc[flag.index].to_numpy() == 1
+        said = flag.to_numpy()
+        flagged.append(int(said.sum()))
+        precision.append((said & y).sum() / said.sum() if said.any() else np.nan)
+    table.insert(3, "called suspicious", flagged)
+    table.insert(5, "precision", precision)
+    return table
+
+
+def suspicious_share(results: pd.DataFrame, strata: pd.Series) -> pd.DataFrame:
+    """Per stratum, the share of accounts each model and condition calls suspicious."""
+    frame = results.assign(
+        stratum=results["account"].map(strata),
+        says=results["decision"] == sr.SUSPICIOUS,
+    )
+    table = frame.pivot_table(
+        index="stratum", columns=["model", "condition"], values="says", aggfunc="mean"
+    )
+    order = [s for s in strata.drop_duplicates() if s in table.index]
+    return table.loc[order]
+
+
 # The reading test: each account read alone and with the guide, two models.
 
 READING_VARIABLE = "SSR_READING_DIR"
@@ -490,6 +627,7 @@ def ml_view(accounts, directory: Path) -> pd.DataFrame:
 
 FRESH_SCRIPT = PROJECT_ROOT / "scripts" / "run_fresh.py"
 FRESH_LOG, LIVE_LOG = "run.log", "run_live.log"
+LIVE_PLAN, LIVE_SUMMARY = "run_live_plan.json", "summary_live.csv"
 POOL_SEED, POOL_SIZE = 102, "full"
 # Measured on this machine (15 Nov 2026): seconds per call, and to load a model.
 CALL_SECONDS = {"gemma4:latest": 5, "qwen3.5:9b-q4_K_M": 21}
@@ -535,6 +673,11 @@ def start_fresh_run(
         command.append("--live")
         if accounts is not None:
             command += ["--accounts", str(accounts)]
+        # The answers file shows one run; the plan says how many answers to expect.
+        (folder / fresh.LIVE_ANSWERS).unlink(missing_ok=True)
+        (folder / LIVE_PLAN).write_text(
+            json.dumps({"models": models, "accounts": accounts}), encoding="utf-8"
+        )
     log = (folder / (LIVE_LOG if live else FRESH_LOG)).open("w", encoding="utf-8")
     popen(command, cwd=PROJECT_ROOT, stdout=log, stderr=subprocess.STDOUT)
     return folder
@@ -552,6 +695,96 @@ def fresh_run_status(folder: Path, log: str = FRESH_LOG) -> tuple[str, str]:
     if any(line.startswith("Traceback") for line in lines):
         return "failed", last
     return "running", last
+
+
+def live_plan(folder: Path) -> dict | None:
+    """The models and the number of accounts of the last live run, if started here."""
+    path = folder / LIVE_PLAN
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def expected_answers(plan: dict | None) -> int | None:
+    """Two prompts per account and model; None when the number of accounts is open."""
+    if not plan or not plan.get("accounts"):
+        return None
+    return 2 * int(plan["accounts"]) * len(plan["models"])
+
+
+def log_tail(folder: Path, lines: int = 12, log: str = LIVE_LOG) -> str:
+    """The last lines of a run's log."""
+    path = folder / log
+    if not path.exists():
+        return ""
+    text = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+    return "\n".join(text[-lines:])
+
+
+def live_answer_table(
+    answers: pd.DataFrame, cases: pd.DataFrame, models: dict
+) -> pd.DataFrame:
+    """The answers of a running live run as the page shows them: case names, not
+    accounts, and readable models and conditions. No label, no stratum."""
+    names = cases.set_index("account")["case"]
+    conditions = {pl.READ_ALONE: "alone", pl.READ_SHOTS: "with the guide"}
+    reading = answers["condition"].map(conditions).fillna(answers["condition"])
+    table = pd.DataFrame(
+        {
+            "time": answers["time"],
+            "case": answers["account"].map(names).fillna(answers["account"]),
+            "model": answers["model"].map(models).fillna(answers["model"]),
+            "reading": reading,
+            "decision": answers["decision"]
+            .fillna("no usable answer")
+            .str.replace("_", " "),
+            "confidence": answers["confidence"],
+            "seconds": answers["seconds"].round(1),
+            "source": answers["source"],
+        }
+    )
+    return table.iloc[::-1].reset_index(drop=True)
+
+
+def reader_name(name: str, models: dict) -> str:
+    """'gemma4 K1_guide_shots' as 'Gemma 4, with the guide'; other names as they are."""
+    conditions = {pl.READ_ALONE: "alone", pl.READ_SHOTS: "with the guide"}
+    for model, label in models.items():
+        for condition, text in conditions.items():
+            if name == f"{model.split(':')[0]} {condition}":
+                return f"{label}, {text}"
+    return name
+
+
+LIVE_OUTPUTS = [
+    (fresh.LIVE_ANSWERS, "this run's answers, one line each, as they come"),
+    (LIVE_RESULTS, "every live answer so far; the Guided reading page reads it"),
+    ("../live_answers.sqlite", "the raw replies of the local models"),
+    (LIVE_SUMMARY, "every reader on all live accounts: AUC-ROC, recall, false alarms"),
+    (LIVE_LOG, "the log of the last run"),
+]
+
+
+def live_outputs(folder: Path) -> pd.DataFrame:
+    """Where a live run writes, and what each file holds."""
+    rows = []
+    for name, holds in LIVE_OUTPUTS:
+        path = (folder / name).resolve()
+        exists = path.exists()
+        rows.append(
+            {
+                "file": str(path.relative_to(PROJECT_ROOT))
+                if path.is_relative_to(PROJECT_ROOT)
+                else str(path),
+                "holds": holds,
+                "last written": time.strftime(
+                    "%d %b %H:%M", time.localtime(path.stat().st_mtime)
+                )
+                if exists
+                else "not yet",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def result_opinion(
@@ -641,6 +874,23 @@ def test_count(root: Path = PROJECT_ROOT) -> int:
         for path in (root / "tests").glob("test_*.py")
         for line in path.read_text(encoding="utf-8").splitlines()
     )
+
+
+def collected_tests(root: Path = PROJECT_ROOT, run=subprocess.run) -> int | None:
+    """The number of tests pytest collects (a parametrised function counts once per
+    case), or None if pytest cannot say."""
+    try:
+        done = run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.search(r"(\d+) tests? collected", done.stdout)
+    return int(found.group(1)) if found else None
 
 
 def mutation_summary(directory: Path) -> dict | None:

@@ -111,8 +111,12 @@ def build(seed: int, size: str, out) -> pd.DataFrame:
     return prompts
 
 
-def ask_live(prompts, model, digest, stored, live) -> pd.DataFrame:
-    """Every prompt asked now; an answer the model cannot give comes from the cache."""
+def ask_live(prompts, model, digest, stored, live, sink=None) -> pd.DataFrame:
+    """Every prompt asked now; an answer the model cannot give comes from the cache.
+
+    With `sink`, each answer is also added to that file as soon as it comes, so the
+    demo can show the run while it works.
+    """
     rows = []
     for number, row in enumerate(prompts.itertuples(), start=1):
         key = pipeline.answer_key(row.prompt, digest, THINK["off"])
@@ -143,7 +147,14 @@ def ask_live(prompts, model, digest, stored, live) -> pd.DataFrame:
                 "source": source,
             }
         )
-        print(f"  {number}/{len(prompts)}  {source}", flush=True)
+        if sink is not None:
+            stamped = {**rows[-1], "time": time.strftime("%H:%M:%S")}
+            fresh.append_live_answer(sink, stamped)
+        print(
+            f"  {number}/{len(prompts)}  {source}  {row.condition}  "
+            f"{answer['decision']}  {reply['seconds']:.1f} s",
+            flush=True,
+        )
     return pd.DataFrame(rows)
 
 
@@ -182,7 +193,16 @@ def main() -> int:
         waiting = [a for a in order if a not in set(earlier["account"])]
         chosen = waiting[: args.accounts] if args.accounts else waiting
         prompts = prompts[prompts["account"].isin(chosen)]
-        print(f"live: {len(chosen)} accounts not asked live before", flush=True)
+        print(
+            f"step 1/4  accounts: {len(chosen)} new accounts that no live run has "
+            f"read, {len(prompts)} prompts (alone and with the guide)",
+            flush=True,
+        )
+        print(
+            "step 2/4  XGBoost: the stored out-of-fold scores of the frozen "
+            "transaction model; the reader never sees them",
+            flush=True,
+        )
 
     readers = {}
     if not args.no_llm:
@@ -191,10 +211,12 @@ def main() -> int:
         parts = [earlier] if len(earlier) else []
         try:
             for name in args.models.split(","):
-                print(f"answers: {name}, {len(prompts)} prompts", flush=True)
+                step = "step 3/4  " if args.live else ""
+                print(f"{step}answers: {name}, {len(prompts)} prompts", flush=True)
                 digest = model_digest(name)
                 if args.live:
-                    parts.append(ask_live(prompts, name, digest, stored, live))
+                    sink = out / fresh.LIVE_ANSWERS
+                    parts.append(ask_live(prompts, name, digest, stored, live, sink))
                 else:
                     before = len(stored)
                     parts.append(
@@ -224,9 +246,14 @@ def main() -> int:
         | readers
     )
     summary = fresh.reader_table(cases, readers)
-    summary.to_csv(
-        out / ("summary_live.csv" if args.live else "summary.csv"), index=False
-    )
+    summary_name = "summary_live.csv" if args.live else "summary.csv"
+    summary.to_csv(out / summary_name, index=False)
+    if args.live:
+        print(
+            f"step 4/4  summary: every reader on all {len(cases)} live accounts, "
+            f"written to {summary_name}",
+            flush=True,
+        )
     print()
     print(summary.round(3).to_string(index=False))
     print("\nSmall samples give wide intervals.")

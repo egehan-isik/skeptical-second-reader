@@ -1002,6 +1002,19 @@ MUTATIONS = [
         "return (~strata.isin([MATCHED_NAME, RANDOM_NAME])).astype(int)",
         "return (~strata.isin([MATCHED_NAME])).astype(int)",
     ),
+    Mutation(
+        "the live answers file writes the stratum, which gives the label away",
+        FRESH,
+        '    "source",\n]',
+        '    "source",\n    "group",\n]',
+    ),
+    Mutation(
+        "the live run page shows account numbers instead of case names",
+        DEMO,
+        '            "time": answers["time"],\n',
+        '            "time": answers["time"],\n'
+        '            "account": answers["account"],\n',
+    ),
 ]
 
 
